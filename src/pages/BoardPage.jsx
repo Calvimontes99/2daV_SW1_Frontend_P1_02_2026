@@ -812,7 +812,26 @@ const BoardPage = () => {
           });
           return;
         }
-        const mensaje = motivoDelServidor(await leerJSON(resp)) || mensajeDeError(errorDeRespuesta(resp, null), 'No se pudo generar el archivo .EAP.');
+        const cuerpo = await leerJSON(resp);
+        // Los mensajes de esta exportación los escribe el servidor para el usuario: se muestran
+        // tal cual (el filtro general los descartaba por palabras como "Windows" o "XMI")
+        const delServidor = typeof cuerpo?.message === 'string' && cuerpo.message.trim()
+          ? cuerpo.message.trim().slice(0, 600)
+          : null;
+        if (resp.status === 501) {
+          // Servidor sin Windows (p. ej. Render): se ofrece el XMI 2.1, que EA también importa
+          const eleccion = await Swal.fire({
+            icon: 'info',
+            title: 'El .EAP se genera desde Windows',
+            text: delServidor || 'Este servidor no puede generar archivos .EAP.',
+            showCancelButton: true,
+            confirmButtonText: 'Descargar XMI 2.1',
+            cancelButtonText: 'Cerrar'
+          });
+          if (eleccion.isConfirmed) await handleExportXMI();
+          return;
+        }
+        const mensaje = delServidor || motivoDelServidor(cuerpo) || mensajeDeError(errorDeRespuesta(resp, null), 'No se pudo generar el archivo .EAP.');
         Swal.fire({ icon: 'error', title: 'No se pudo exportar a EAP', text: mensaje });
         return;
       }
@@ -820,11 +839,27 @@ const BoardPage = () => {
       const blob = await resp.blob();
       const disp = resp.headers.get('content-disposition') || '';
       const m = /filename="?([^";]+)"?/.exec(disp);
-      const nombre = m ? m[1] : `diagrama-${boardId}.eap`;
+      const esKit = (resp.headers.get('content-type') || '').includes('zip');
+      const nombre = m ? m[1] : (esKit ? `diagrama-${boardId}-generar-eap.zip` : `diagrama-${boardId}.eap`);
       const { saveAs } = await import('file-saver');
       saveAs(blob, nombre);
 
       Swal.close();
+      if (esKit) {
+        // Servidor sin Windows: llega el kit para generar el .EAP con doble clic
+        Swal.fire({
+          icon: 'success',
+          title: '✅ Descargado: genera el .EAP con doble clic',
+          html: `<div class="text-left text-sm"><p>Archivo: <strong>${nombre}</strong></p>
+            <p class="mt-2">Este servidor no puede escribir archivos .EAP (usan el motor de Access de Windows), así que te llega listo para generarlo en tu PC:</p>
+            <ol class="list-decimal ml-5 mt-2"><li>Descomprime el ZIP (clic derecho → Extraer todo).</li>
+            <li>Doble clic en <strong>GENERAR_EAP.bat</strong>.</li>
+            <li>Se crea el <strong>.eap</strong> en esa carpeta: ábrelo en Enterprise Architect con Open Project.</li></ol>
+            <p class="mt-2 text-gray-600">Funciona en cualquier PC con Windows, sin instalar nada. Si aparece "Windows protegió tu PC": Más información → Ejecutar de todas formas.</p></div>`,
+          confirmButtonText: 'Entendido'
+        });
+        return;
+      }
       Swal.fire({
         icon: 'success',
         title: '✅ Proyecto de Enterprise Architect listo',

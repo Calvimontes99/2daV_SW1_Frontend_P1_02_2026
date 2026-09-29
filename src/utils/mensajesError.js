@@ -25,6 +25,7 @@ const POR_ESTADO = {
   413: 'Lo que intentas enviar es demasiado grande. Prueba con un archivo o diagrama más pequeño.',
   429: 'Se hicieron demasiadas solicitudes seguidas. Espera un momento e intenta de nuevo.',
   500: 'Ocurrió un problema en el servidor. Intenta de nuevo en unos segundos.',
+  501: 'Esta función no está disponible en este servidor.',
   502: 'El servidor no está disponible en este momento o se está iniciando. Espera un minuto y vuelve a intentar.',
   503: 'El servidor no está disponible en este momento o se está iniciando. Espera un minuto y vuelve a intentar.',
   504: 'El servidor tardó demasiado en responder. Espera un momento y vuelve a intentar.',
