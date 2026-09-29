@@ -82,6 +82,9 @@ export default function AiBubble({ boardId, nodes, edges, setNodes, setEdges, up
   const [isRecording, setIsRecording] = useState(false);
   const mediaRecorderRef = useRef(null);
   const recordedChunksRef = useRef([]);
+  // Un audio ya grabado (nota de voz, mp3, wav…) sigue el mismo camino que la grabadora
+  const audioFileRef = useRef(null);
+  const [audioSubido, setAudioSubido] = useState('');
   const [, forceUpdate] = useState(0); // Para forzar re-render
 
   // Estados para manejo de clarificaciones en modificaciones
@@ -543,6 +546,7 @@ export default function AiBubble({ boardId, nodes, edges, setNodes, setEdges, up
       return;
     }
     recordedChunksRef.current = [];
+    setAudioSubido('');
     forceUpdate(Date.now());
     setLoading(false);
     if (!transcripcion) {
@@ -573,9 +577,32 @@ export default function AiBubble({ boardId, nodes, edges, setNodes, setEdges, up
     // Las miniaturas quedan en el historial del chat, así que no se liberan al vaciar la bandeja
     setImagenes((previas) => { previas.forEach((i) => { i.enviada = true; }); return []; });
 
+    let actuales = { nodes: nodes || [], edges: edges || [] };
     try {
       for (let i = 0; i < lote.length; i++) {
         if (lote.length > 1) pushMessage({ role: 'ai', text: `Analizando la imagen ${i + 1} de ${lote.length}…` });
+        const hayClases = (actuales.nodes || []).some((n) => n && n.data && n.data.className);
+        if (hayClases) {
+          // Editar lo que ya existe: la IA recibe la imagen y el diagrama actual
+          const editado = await modifyDiagram({
+            prompt: texto || '',
+            nodes: actuales.nodes,
+            edges: actuales.edges,
+            mode: 'modify',
+            salaId: boardId,
+            file: lote[i].file
+          });
+          if (!editado || !editado.success || !editado.newState) {
+            pushMessage({ role: 'ai', text: mensajeDeError(new Error((editado && editado.error) || ''), 'La IA no pudo leer la imagen. Prueba con una foto más nítida.') });
+            continue;
+          }
+          actuales = { nodes: editado.newState.nodes || [], edges: editado.newState.edges || [] };
+          setNodes([...actuales.nodes]);
+          setEdges([...actuales.edges]);
+          if (typeof updateBoardData === 'function') await updateBoardData({ nodes: actuales.nodes, edges: actuales.edges });
+          pushMessage({ role: 'ai', text: `🖼️ ${editado.message || 'Diagrama actualizado con la imagen'}` });
+          continue;
+        }
         const res = await generateDiagram({ type: 'image', content: texto, file: lote[i].file, salaId: boardId });
         if (!res || !res.success) {
           pushMessage({ role: 'ai', text: mensajeDeError(new Error((res && res.error) || ''), 'La IA no pudo leer la imagen. Prueba con una foto más nítida.') });
@@ -631,11 +658,11 @@ export default function AiBubble({ boardId, nodes, edges, setNodes, setEdges, up
         'muchos a muchos', 'many to many'
       ];
       
-      const isModification = mode === 'edit' || 
-                           (nodes && nodes.length > 0) && 
-                           modificationKeywords.some(keyword => 
+      const hayClases = (nodes || []).some((n) => n && n.data && n.data.className);
+      const isModification = mode === 'edit' || hayClases ||
+                           modificationKeywords.some(keyword =>
                              text.toLowerCase().includes(keyword)
-                           );
+                           ) && (nodes && nodes.length > 0);
 
       let res;
       if (isModification) {
@@ -939,7 +966,7 @@ export default function AiBubble({ boardId, nodes, edges, setNodes, setEdges, up
                       <div className="mb-3 p-2 bg-green-50 border border-green-200 rounded-lg">
                         <div className="flex items-center justify-center gap-2 text-green-700">
                           <span className="text-lg">✅</span>
-                          <span className="text-sm font-medium">Audio grabado - Listo para enviar</span>
+                          <span className="text-sm font-medium">{audioSubido ? `Audio "${audioSubido}" listo para enviar` : 'Audio grabado - Listo para enviar'}</span>
                         </div>
                       </div>
                     )}
@@ -967,11 +994,45 @@ export default function AiBubble({ boardId, nodes, edges, setNodes, setEdges, up
                         )}
                       </button>
                       
+                      {/* Subir un audio ya grabado: se transcribe igual que la grabación */}
+                      {!isRecording && (
+                        <>
+                          <input
+                            ref={audioFileRef}
+                            type="file"
+                            accept="audio/*"
+                            className="hidden"
+                            onChange={(e) => {
+                              const archivo = e.target.files && e.target.files[0];
+                              e.target.value = '';
+                              if (!archivo) return;
+                              if (!archivo.type.startsWith('audio/') && !/\.(mp3|wav|ogg|opus|m4a|aac|webm|flac)$/i.test(archivo.name)) {
+                                pushMessage({ role: 'ai', text: 'Ese archivo no es un audio. Usa MP3, WAV, OGG, M4A o una nota de voz.' });
+                                return;
+                              }
+                              recordedChunksRef.current = [archivo];
+                              setAudioSubido(archivo.name);
+                              forceUpdate(Date.now());
+                            }}
+                          />
+                          <button
+                            type="button"
+                            onClick={() => audioFileRef.current && audioFileRef.current.click()}
+                            disabled={loading}
+                            title="Subir un audio grabado (nota de voz, MP3, WAV, OGG, M4A)"
+                            className={`px-4 py-3 bg-indigo-500 hover:bg-indigo-600 text-white rounded-full font-medium transition-all duration-200 ${loading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                          >
+                            📁 Subir audio
+                          </button>
+                        </>
+                      )}
+
                       {/* Botón de limpiar grabación */}
                       {!isRecording && recordedChunksRef.current && recordedChunksRef.current.length > 0 && (
                         <button
                           onClick={() => {
                             recordedChunksRef.current = [];
+                            setAudioSubido('');
                             forceUpdate(Date.now()); // Forzar re-render
                           }}
                           className="px-4 py-3 bg-gray-500 hover:bg-gray-600 text-white rounded-full font-medium transition-all duration-200"
@@ -987,7 +1048,7 @@ export default function AiBubble({ boardId, nodes, edges, setNodes, setEdges, up
                         ? 'Habla claramente y pulsa "Detener" cuando termines' 
                         : recordedChunksRef.current && recordedChunksRef.current.length > 0
                           ? 'Audio listo. Pulsa "Enviar" para generar el diagrama'
-                          : 'Pulsa "Grabar" y describe el diagrama que quieres crear'
+                          : 'Pulsa "Grabar" y describe el diagrama, o sube un audio ya grabado'
                       }
                     </div>
                   </div>

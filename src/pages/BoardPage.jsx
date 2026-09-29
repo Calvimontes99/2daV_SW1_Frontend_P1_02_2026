@@ -783,6 +783,63 @@ const BoardPage = () => {
     }
   };
 
+  // Proyecto de Enterprise Architect (.EAP) con el diagrama de clases dibujado en el lienzo
+  const handleExportEAP = async () => {
+    try {
+      marcarTarea('exportar');
+      if (!nodes.length) {
+        Swal.fire({ icon: 'warning', title: 'Diagrama vacío', text: 'No hay clases para exportar a Enterprise Architect.' });
+        return;
+      }
+      Swal.fire({ title: 'Generando proyecto de Enterprise Architect...', allowOutsideClick: false, showConfirmButton: false, didOpen: () => Swal.showLoading() });
+
+      const base = import.meta.env.VITE_API_BASE || import.meta.env.VITE_WS_URL || window.location.origin;
+      const resp = await fetch(`${base}/apis/crearPagina/exportarEAP/${boardId}`, {
+        method: 'POST',
+        credentials: 'include'
+      });
+
+      if (!resp.ok) {
+        Swal.close();
+        if (resp.status === 404) {
+          // El servidor no conoce la ruta: corre una versión anterior a la exportación EAP
+          Swal.fire({
+            icon: 'error',
+            title: 'El servidor no tiene la exportación a EAP',
+            html: `<div class="text-left text-sm"><p>El backend al que está conectada la página es una versión anterior y no conoce esta función.</p>
+              <ul class="list-disc ml-5 mt-2"><li>Si usas la app en tu PC: cierra el backend y vuelve a iniciarlo con <strong>npm start</strong> en la carpeta <strong>backend</strong>.</li>
+              <li>La web publicada en Render no la tiene: esos cambios están solo en tu equipo.</li></ul></div>`
+          });
+          return;
+        }
+        const mensaje = motivoDelServidor(await leerJSON(resp)) || mensajeDeError(errorDeRespuesta(resp, null), 'No se pudo generar el archivo .EAP.');
+        Swal.fire({ icon: 'error', title: 'No se pudo exportar a EAP', text: mensaje });
+        return;
+      }
+
+      const blob = await resp.blob();
+      const disp = resp.headers.get('content-disposition') || '';
+      const m = /filename="?([^";]+)"?/.exec(disp);
+      const nombre = m ? m[1] : `diagrama-${boardId}.eap`;
+      const { saveAs } = await import('file-saver');
+      saveAs(blob, nombre);
+
+      Swal.close();
+      Swal.fire({
+        icon: 'success',
+        title: '✅ Proyecto de Enterprise Architect listo',
+        html: `<div class="text-left"><p>Archivo: <strong>${nombre}</strong></p><p class="text-sm text-gray-600 mt-2">Ábrelo en Enterprise Architect con <strong>Open Project</strong>. En el Project Browser: Model → el paquete del tablero → Modelo de clases → el diagrama ya está dibujado.</p></div>`,
+        confirmButtonText: 'Perfecto'
+      });
+    } catch (error) {
+      console.error('handleExportEAP error:', error);
+      Swal.close();
+      Swal.fire({ icon: 'error', title: 'Error', text: 'No se pudo generar el archivo .EAP.' });
+    }
+  };
+
+  // Colección de Postman + guía COMO_LLAMAR_LA_API.txt. La arma el servidor leyendo el backend
+  // que genera este tablero: rutas, campos, tipos y cuentas de prueba coinciden con el proyecto.
   const handleGeneratePostmanCollection = async () => {
     try {
       const validNodes = nodes.filter(node => node.data?.className && node.data.className.trim() !== '');
@@ -790,125 +847,38 @@ const BoardPage = () => {
         Swal.fire({ icon: 'warning', title: 'Diagrama vacío', text: 'No hay clases para generar la colección Postman.' });
         return;
       }
+      Swal.fire({ title: 'Generando colección de Postman...', allowOutsideClick: false, showConfirmButton: false, didOpen: () => Swal.showLoading() });
 
-      const baseUrlVar = '{{baseUrl}}';
-      const authVar = '{{authToken}}';
-
-      const collection = {
-        info: {
-          name: `UML - ${boardId || 'collection'}`,
-          schema: 'https://schema.getpostman.com/json/collection/v2.1.0/collection.json'
-        },
-        item: [],
-        variable: [
-          // El backend GENERADO corre en 8080 (ver application.properties del ZIP).
-          // Antes apuntaba a VITE_API_BASE, que es la propia herramienta -> 404 en todo.
-          { key: 'baseUrl', value: 'http://localhost:8080' },
-          { key: 'authToken', value: '' }
-        ]
-      };
-
-      const sampleValueForType = (type) => {
-        if (!type) return '';
-        const t = String(type).toLowerCase();
-        if (t.includes('string')) return 'example';
-        if (t.includes('int') || t.includes('long') || t === 'number') return 1;
-        // Decimales: antes devolvian 'example' (texto) y el backend respondia 400
-        if (t.includes('double') || t.includes('float') || t.includes('decimal') || t.includes('bigdecimal')) return 10.5;
-        if (t.includes('bool')) return true;
-        if (t.includes('date')) return new Date().toISOString();
-        return 'example';
-      };
-
-      const buildSampleBody = (attributes) => {
-        const obj = {};
-        if (!attributes || !Array.isArray(attributes)) return obj;
-        attributes.forEach(attr => {
-          // attr puede ser 'name: type' o un objeto
-          if (typeof attr === 'string' && attr.includes(':')) {
-            const [rawName, rawType] = attr.split(':').map(s => s.trim());
-            const name = rawName.replace(/^[+\-#]/, '').trim();
-            obj[name] = sampleValueForType(rawType);
-          } else if (typeof attr === 'object' && attr.name) {
-            obj[attr.name] = sampleValueForType(attr.type || 'string');
-          }
-        });
-        return obj;
-      };
-
-      for (const node of validNodes) {
-        const className = node.data.className;
-        const path = `api/${className.toLowerCase()}`;
-        const attributes = node.data.attributes || [];
-        const sampleBody = buildSampleBody(attributes);
-
-        const folder = {
-          name: className,
-          item: []
-        };
-
-        // GET all
-        folder.item.push({
-          name: `GET ${path}`,
-          request: {
-            method: 'GET',
-            header: [ { key: 'Authorization', value: authVar, disabled: false } ],
-            url: { raw: `${baseUrlVar}/${path}`, host: [ baseUrlVar ], path: [ path ] }
-          }
-        });
-
-        // GET by id
-        folder.item.push({
-          name: `GET ${path}/{id}`,
-          request: {
-            method: 'GET',
-            header: [ { key: 'Authorization', value: authVar } ],
-            url: { raw: `${baseUrlVar}/${path}/{{id}}`, host: [ baseUrlVar ], path: [ path, '{{id}}' ] }
-          }
-        });
-
-        // POST
-        folder.item.push({
-          name: `POST ${path}`,
-          request: {
-            method: 'POST',
-            header: [ { key: 'Content-Type', value: 'application/json' }, { key: 'Authorization', value: authVar } ],
-            body: { mode: 'raw', raw: JSON.stringify(sampleBody, null, 2) },
-            url: { raw: `${baseUrlVar}/${path}`, host: [ baseUrlVar ], path: [ path ] }
-          }
-        });
-
-        // PUT
-        folder.item.push({
-          name: `PUT ${path}/{id}`,
-          request: {
-            method: 'PUT',
-            header: [ { key: 'Content-Type', value: 'application/json' }, { key: 'Authorization', value: authVar } ],
-            body: { mode: 'raw', raw: JSON.stringify(sampleBody, null, 2) },
-            url: { raw: `${baseUrlVar}/${path}/{{id}}`, host: [ baseUrlVar ], path: [ path, '{{id}}' ] }
-          }
-        });
-
-        // DELETE
-        folder.item.push({
-          name: `DELETE ${path}/{id}`,
-          request: {
-            method: 'DELETE',
-            header: [ { key: 'Authorization', value: authVar } ],
-            url: { raw: `${baseUrlVar}/${path}/{{id}}`, host: [ baseUrlVar ], path: [ path, '{{id}}' ] }
-          }
-        });
-
-        collection.item.push(folder);
+      const base = import.meta.env.VITE_API_BASE || import.meta.env.VITE_WS_URL || window.location.origin;
+      const resp = await fetch(`${base}/apis/crearPagina/exportarPostman/${boardId}`, {
+        method: 'POST',
+        credentials: 'include'
+      });
+      if (!resp.ok) {
+        Swal.close();
+        const mensaje = motivoDelServidor(await leerJSON(resp)) || mensajeDeError(errorDeRespuesta(resp, null), 'No se pudo generar la colección de Postman.');
+        Swal.fire({ icon: 'error', title: 'No se pudo generar la colección de Postman', text: mensaje });
+        return;
       }
 
-      const blob = new Blob([JSON.stringify(collection, null, 2)], { type: 'application/json' });
-      const fileName = `postman-collection-uml-${boardId || 'collection'}.json`;
-      saveAs(blob, fileName);
-      Swal.fire({ icon: 'success', title: 'Colección Postman descargada', text: `Archivo: ${fileName}` });
+      const blob = await resp.blob();
+      const disp = resp.headers.get('content-disposition') || '';
+      const m = /filename="?([^";]+)"?/.exec(disp);
+      const nombre = m ? m[1] : `postman-${boardId}.zip`;
+      saveAs(blob, nombre);
 
+      Swal.close();
+      Swal.fire({
+        icon: 'success',
+        title: '✅ Colección de Postman lista',
+        html: `<div class="text-left"><p>Archivo: <strong>${nombre}</strong></p>
+          <p class="text-sm text-gray-600 mt-2">Trae la colección y <strong>COMO_LLAMAR_LA_API.txt</strong>, con los pasos, las cuentas de prueba y ejemplos con curl.</p>
+          <p class="text-sm text-gray-600 mt-2">En Postman: <strong>Import</strong> → el archivo .json → ejecuta <em>"0. Sesión → Iniciar sesión"</em> y el token queda guardado para todo lo demás.</p></div>`,
+        confirmButtonText: 'Perfecto'
+      });
     } catch (err) {
       console.error('Error generando colección Postman:', err);
+      Swal.close();
       Swal.fire({ icon: 'error', title: 'No se pudo generar la colección de Postman', text: mensajeDeError(err, 'Intenta de nuevo.') });
     }
   };
@@ -1665,6 +1635,20 @@ const BoardPage = () => {
               <path strokeWidth="1.5" d="M14 3h7v7M21 3l-9 9" />
             </svg>
             XMI
+          </button>
+
+          <button
+            onClick={handleExportEAP}
+            className="btn-secondary bg-gradient-to-r from-teal-600 to-cyan-700 text-white px-3 py-2 rounded-md flex items-center gap-2"
+            title="Exportar como proyecto de Enterprise Architect (.EAP) con el diagrama dibujado"
+            data-tour="eap"
+          >
+            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+              <rect x="3" y="4" width="7" height="6" rx="1" strokeWidth="1.5" />
+              <rect x="14" y="14" width="7" height="6" rx="1" strokeWidth="1.5" />
+              <path strokeWidth="1.5" d="M10 7h4v10" />
+            </svg>
+            EAP
           </button>
 
           {/* Usuarios activos */}
