@@ -93,9 +93,8 @@ function ClassNode({ data, isConnectable }) {
           titulo={observaciones.map((o) => `• ${o.texto}`).join('\n')}
         />
       )}
-      {/* Handles para clases normales - Múltiples puntos de conexión */}
-      {!data?.isAssociationClass && (
-        <>
+      {/* Puntos de conexión (también en una clase de asociación: puede tener sus propias relaciones) */}
+      <>
           {/* HANDLES BIDIRECCIONALES - Lado Derecho (VERDE) */}
           <Handle
             type="source"
@@ -231,29 +230,17 @@ function ClassNode({ data, isConnectable }) {
           />
 
 
-        </>
-      )}
+      </>
 
-      {/* Handle especial para clases de asociación (parte inferior) */}
+      {/* Punto invisible donde se enganchaba la línea punteada en los tableros anteriores
+          (ahora la dibuja la relación); se conserva para que esas aristas sigan siendo válidas */}
       {data?.isAssociationClass && (
         <Handle
           type="source"
           position={Position.Bottom}
           id="bottom"
-          isConnectable={isConnectable}
-          className="handle"
-          style={{ 
-            bottom: -10,
-            left: '50%',
-            transform: 'translateX(-50%)',
-            width: '18px',
-            height: '18px',
-            border: '3px solid #dc2626', // Rojo para debugging
-            background: '#ffffff',
-            borderRadius: '50%',
-            cursor: 'crosshair',
-            zIndex: 1000
-          }}
+          isConnectable={false}
+          style={{ opacity: 0, pointerEvents: 'none' }}
         />
       )}
 

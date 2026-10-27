@@ -21,6 +21,8 @@ import { aplicarOps, fusionarOps, limpiar } from './operacionesDiagrama.js';
  *    la aplica dos veces; al entrar, informa cuáles de las pendientes ya tenía.
  *  - Una tanda tiene como mucho MAX_POR_TANDA operaciones (el servidor rechaza, entera, una más
  *    grande que su máximo, en vez de guardarla recortada).
+ *  - Los cambios que hizo la IA local (sin conexión) van en tandas propias con `origen`, para que
+ *    el servidor los anote en el historial como de la IA y no se mezclen con ediciones a mano.
  */
 
 export const MAX_POR_TANDA = 500;
@@ -40,7 +42,9 @@ export class Sincronia {
     this.siguienteSeq = Number.isInteger(guardado.siguienteSeq) && guardado.siguienteSeq > 0 ? guardado.siguienteSeq : 1;
     // Lo que viene guardado pudo haber salido antes de recargar: queda sellado (no se le suman
     // cambios nuevos), porque el servidor puede reconocer ese id y descartarlo entero
-    this.pendientes = Array.isArray(guardado.pendientes) ? guardado.pendientes.map((l) => ({ id: l.id, ops: l.ops, sellada: true })) : [];
+    this.pendientes = Array.isArray(guardado.pendientes)
+      ? guardado.pendientes.map((l) => ({ id: l.id, ops: l.ops, sellada: true, ...(l.origen ? { origen: l.origen } : {}) }))
+      : [];
     // Copias de antes de la numeración por cliente: se conservan con su id original hasta que el
     // servidor diga si ya las aplicó (ver estadoServidor). Renumerarlas a ciegas hacía que una
     // tanda ya guardada se repitiera sobre trabajo posterior.
@@ -61,9 +65,17 @@ export class Sincronia {
    * porque el servidor puede tenerla y reconocerla por su id; si se le sumara una edición nueva,
    * al descartarla por repetida se perdería también esa edición.
    */
-  local(ops) {
+  local(ops, { origen = null } = {}) {
     if (!ops || !ops.length) return;
     const ultima = this.pendientes[this.pendientes.length - 1];
+    if (origen) {
+      // Cambios de la IA local: tandas propias y selladas (lo que se edite después va aparte)
+      if (ultima) ultima.sellada = true;
+      for (let i = 0; i < ops.length; i += MAX_POR_TANDA) {
+        this.pendientes.push({ id: this.nuevoIdLote(), ops: ops.slice(i, i + MAX_POR_TANDA), sellada: true, origen });
+      }
+      return;
+    }
     if (ultima && !ultima.sellada) {
       const juntas = fusionarOps(ultima.ops, ops);
       if (juntas.length <= MAX_POR_TANDA) { ultima.ops = juntas; return; }
@@ -90,7 +102,7 @@ export class Sincronia {
     if (!lote || lote.legado) return null;
     lote.sellada = true; // desde que sale, ya no se modifica
     this.enVuelo = lote.id;
-    return { id: lote.id, ops: lote.ops };
+    return { id: lote.id, ops: lote.ops, ...(lote.origen ? { origen: lote.origen } : {}) };
   }
 
   /**
@@ -173,7 +185,7 @@ export class Sincronia {
   serializar() {
     return {
       confirmado: { nodes: this.confirmado.nodes.map(limpiar), edges: this.confirmado.edges.map(limpiar) },
-      pendientes: this.pendientes.map((l) => ({ id: l.id, ops: l.ops })),
+      pendientes: this.pendientes.map((l) => ({ id: l.id, ops: l.ops, ...(l.origen ? { origen: l.origen } : {}) })),
       clienteId: this.clienteId,
       siguienteSeq: this.siguienteSeq,
     };

@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { Sincronia, conservarTransitorios } from '../src/utils/sincronia.js';
 import { aplicarOps, opsEntre } from '../src/utils/operacionesDiagrama.js';
+import { normalizarClasesAsociacion } from '../src/utils/claseAsociacion.js';
 
 export const montarSocketFlow = ({ inicial = { nodes: [], edges: [] }, guardado = null } = {}) => {
   let servidor = structuredClone(inicial);
@@ -23,7 +24,7 @@ export const montarSocketFlow = ({ inicial = { nodes: [], edges: [] }, guardado 
   };
   const estados = []; const efectos = [];
   const contexto = {
-    console, env: {}, Sincronia, conservarTransitorios, opsEntre, URLSearchParams,
+    console, env: {}, Sincronia, conservarTransitorios, opsEntre, normalizarClasesAsociacion, URLSearchParams,
     window: { location: { origin: 'http://prueba.invalid', search: '', pathname: '/board/1' }, history: { replaceState() {} }, addEventListener() {}, removeEventListener() {} },
     document: { cookie: '' }, localStorage: { getItem() { return null; } },
     leerSincronia() { return guardado; }, guardarSincronia(_, x) { local = structuredClone(x); return true; }, olvidarCopia() {},

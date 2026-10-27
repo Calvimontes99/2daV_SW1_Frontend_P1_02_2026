@@ -15,6 +15,7 @@
 
 import { formatearAtributo, formatearMetodo } from './umlParser.js';
 import { distribuirNodos } from './distribucionImportada.js';
+import { vincularClaseAsociacion } from './claseAsociacion.js';
 
 const VIS_VALIDAS = ['public', 'private', 'protected', 'package'];
 
@@ -303,8 +304,11 @@ export const prepararImportacionXmi = (xmlText) => {
       return agrega(b) && !agrega(a) ? [b, a] : [a, b];
     };
 
+    // Una uml:AssociationClass es a la vez una clase (ya es un nodo) y una asociación:
+    // se agrega la relación y luego se une a su clase con la línea punteada
+    const clasesDeAsociacion = [];
     empaquetados
-      .filter((el) => tipoXmi(el).endsWith('Association'))
+      .filter((el) => /Association(Class)?$/.test(tipoXmi(el)))
       .forEach((asoc, index) => {
         let extremos = hijosPorNombre(asoc, 'ownedEnd');
         if (extremos.length < 2) {
@@ -330,8 +334,10 @@ export const prepararImportacionXmi = (xmlText) => {
           }
         }
 
+        const esClaseAsociacion = tipoXmi(asoc).endsWith('AssociationClass');
+        const relacionId = `edge-${attr(asoc, 'id') || `assoc_${index}`}`;
         agregarArista(
-          `edge-${attr(asoc, 'id') || `assoc_${index}`}`,
+          relacionId,
           idPorXmi.get(referencia(origen, 'type')),
           idPorXmi.get(referencia(destino, 'type')),
           {
@@ -340,9 +346,12 @@ export const prepararImportacionXmi = (xmlText) => {
             endLabel: etiquetaCardinalidad(destino),
             sourceRole: origen.getAttribute('name') || '',
             targetRole: destino.getAttribute('name') || '',
-            label: asoc.getAttribute('name') || '',
+            // El nombre de una AssociationClass es el de su clase, no el de la relación
+            label: esClaseAsociacion ? '' : asoc.getAttribute('name') || '',
           }
         );
+        const claseId = esClaseAsociacion && idPorXmi.get(attr(asoc, 'id'));
+        if (claseId) clasesDeAsociacion.push([claseId, relacionId]);
       });
 
     // Dependencias y realizaciones declaradas como elementos del paquete
@@ -362,7 +371,18 @@ export const prepararImportacionXmi = (xmlText) => {
         );
       });
 
-    return { nodes: distribuirNodos(nodes), edges, titulo: diagrama?.nombre || nombreModelo };
+    let tablero = { nodes: distribuirNodos(nodes), edges };
+    clasesDeAsociacion
+      .filter(([, relacionId]) => edges.some((e) => e.id === relacionId))
+      .forEach(([claseId, relacionId]) => {
+        try {
+          tablero = vincularClaseAsociacion(tablero, claseId, relacionId);
+        } catch {
+          // Combinación que el editor no admite: la clase queda como clase común
+        }
+      });
+
+    return { ...tablero, titulo: diagrama?.nombre || nombreModelo };
   };
 
   return { opciones, construir };

@@ -57,6 +57,12 @@ export const TOUR_EDITOR = [
       'Arrastra desde un punto de conexión de una clase hasta otra para crear una relación. Luego selecciónala para elegir su tipo (asociación, herencia, composición...) y sus cardinalidades: 1, *, 0..1, 1..*.',
   },
   {
+    selector: '[data-tour="clase-asociacion"]',
+    titulo: 'Clase de asociación',
+    texto:
+      'Para guardar datos de una relación (p. ej. la nota de una inscripción entre Alumno y Curso), pulsa "Clase de asociación" y haz clic en la línea de esa asociación: aparece una clase unida con línea punteada. Una clase que ya tengas se une desde su panel.',
+  },
+  {
     selector: '[data-tour="verificar"]',
     titulo: 'Revisa el diseño con IA',
     texto:

@@ -549,7 +549,7 @@ const Board = () => {
         icon: "success",
         title: "¡Diagrama importado!",
         html: `<div class="text-left"><p>Se creó el tablero <strong>${title}</strong></p>` +
-              `<p class="text-sm text-gray-600 mt-2">${nodes.length} clases y ${edges.length} relaciones.</p></div>`,
+              `<p class="text-sm text-gray-600 mt-2">${nodes.length} clases y ${edges.filter(e => !e.data?.isAssociationConnection).length} relaciones.</p></div>`,
         confirmButtonText: 'Abrir la lista'
       });
     } catch (error) {

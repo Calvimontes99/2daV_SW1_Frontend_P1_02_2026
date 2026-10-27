@@ -29,15 +29,19 @@ import { generateCode } from '../utils/codeGenerator';
 import { generateCompleteProject } from '../utils/completeProjectGenerator';
 import { verifyUMLDiagramWithAI, validateAICredentials } from '../utils/aiUMLValidator';
 import BurbujaHerramientasDiagrama from '../components/BurbujaHerramientasDiagrama';
-import AiBubble from '../components/AiBubble';
 import ChatSala from '../components/ChatSala';
 import useColaboracion from '../hooks/useColaboracion';
+import useIALocal from '../hooks/useIALocal';
 import { esFantasma, superponerPropuesta } from '../utils/vistaPropuesta';
 import { deshacerSelectivo } from '../utils/deshacerSelectivo';
 import { borrarUsuarioLocal, guardarUsuarioLocal, leerUsuarioLocal } from '../offline/almacenTableros.js';
 import JSZip from 'jszip'
 import { saveAs } from 'file-saver';
 import { leerJSON, errorDeRespuesta, mensajeDeError, motivoDelServidor } from '../utils/mensajesError';
+import {
+  admiteClaseAsociacion, claseAsociacionDe, crearClaseAsociacion, describirRelacion,
+  desvincularClaseAsociacion, puedeSerClaseAsociacion, relacionesParaClase, vincularClaseAsociacion,
+} from '../utils/claseAsociacion';
 
 
 const BoardPage = () => {
@@ -142,6 +146,7 @@ const BoardPage = () => {
     consumirCambioRemoto,
     setNodes,
       setEdges,
+    aplicarCambiosIA,
     conectado,
     socketUnido,
     errorAcceso,
@@ -150,7 +155,13 @@ const BoardPage = () => {
   } = useSocketFlow(boardId, currentUser);
 
   // ----- La IA como integrante del equipo: chat de la sala, propuestas y revisiones -----
-  const colaboracion = useColaboracion(socketUnido, boardId ? parseInt(boardId, 10) : null);
+  const usuarioChat = useMemo(
+    () => (currentUser ? { id: currentUser.id, nombre: currentUser.displayName || currentUser.name || currentUser.email || 'Tú' } : null),
+    [currentUser],
+  );
+  const colaboracion = useColaboracion(socketUnido, boardId ? parseInt(boardId, 10) : null, usuarioChat);
+  // Sin conexión, la IA del chat es la IA local de este equipo (sus cambios quedan como de la IA)
+  const iaLocal = useIALocal({ nodes, edges, aplicar: aplicarCambiosIA });
   const [chatAbierto, setChatAbierto] = useState(true);
   const [revisionOcultaId, setRevisionOcultaId] = useState(null);
   const [medidasFantasma, setMedidasFantasma] = useState({});
@@ -303,7 +314,6 @@ const BoardPage = () => {
 
   
   // Estado para controlar modificaciones de IA
-  const [aiModificationActive, setAiModificationActive] = useState(false);
 
   const ActiveUsers = ({ users }) => (
     <div className="flex flex-wrap gap-2">
@@ -1333,183 +1343,96 @@ const BoardPage = () => {
 
   
 
-  // Función para crear clase de asociación
-  const handleCreateAssociationClass = useCallback(async () => {
-    if (!selectedEdge) return;
+  // ----- Clases de asociación (utils/claseAsociacion.js) -----
+  // "Elegir relación": tras pulsar el botón del panel, el siguiente clic en una línea crea la clase
+  const [eligiendoRelacionAC, setEligiendoRelacionAC] = useState(false);
+  const avisoClaseAsociacion = (titulo) =>
+    Swal.fire({ toast: true, position: 'bottom', timer: 4500, showConfirmButton: false, icon: 'warning', title: titulo });
 
-    // Encontrar los nodos source y target
-    const sourceNode = nodes.find(node => node.id === selectedEdge.source);
-    const targetNode = nodes.find(node => node.id === selectedEdge.target);
+  /** Aplica el tablero que devuelven las funciones de clase de asociación (las clases primero). */
+  const aplicarTablero = useCallback((tablero) => {
+    setNodes(tablero.nodes);
+    setEdges(tablero.edges.map((e) => (e.data?.selected ? { ...e, data: { ...e.data, selected: false } } : e)));
+  }, [setNodes, setEdges]);
 
-    if (!sourceNode || !targetNode) {
-      console.error('No se encontraron los nodos de la relación');
+  /** Crea la clase de asociación de una relación y la deja seleccionada para renombrarla. */
+  const crearClaseAsociacionEn = useCallback((relacionId) => {
+    let resultado;
+    try {
+      resultado = crearClaseAsociacion({ nodes, edges }, relacionId);
+    } catch (error) {
+      avisoClaseAsociacion(error.message);
       return;
     }
+    aplicarTablero(resultado);
+    setSelectedEdge(null);
+    setEditingEdge(null);
+    handleNodeSelection(resultado.nodo);
+  }, [nodes, edges, aplicarTablero, setSelectedEdge, setEditingEdge, handleNodeSelection]);
 
-    // 🎯 ESPERAR A OBTENER LAS COORDENADAS REALES DEL EDGE RENDERIZADO
-    let realLabelX, realLabelY;
-    
-    const waitForRealCoordinates = () => {
-      return new Promise((resolve) => {
-        window.__onAssocEdgeRender = (coords) => {
-          if (coords.edgeId === selectedEdge.id) {
-            realLabelX = coords.realLabelX;
-            realLabelY = coords.realLabelY;
+  // Botón del panel "Relación"
+  const handleCreateAssociationClass = useCallback(() => {
+    if (selectedEdge) crearClaseAsociacionEn(selectedEdge.id);
+  }, [selectedEdge, crearClaseAsociacionEn]);
 
-            window.__onAssocEdgeRender = null; // Limpiar
-            resolve();
-          }
-        };
-        
-        // Forzar re-render del edge
-        setEdges(edges => edges.map(e => 
-          e.id === selectedEdge.id 
-            ? { ...e, data: { ...e.data, hasAssociationClass: true } }
-            : e
-        ));
-        
-        // Timeout de seguridad
-        setTimeout(() => {
-          if (!realLabelX) {
-            console.warn('⚠️ Timeout esperando coordenadas reales, usando fallback');
-            resolve();
-          }
-        }, 100);
-      });
-    };
-    
-    await waitForRealCoordinates();
+  // Botón "Clase de asociación": con una asociación elegida la crea; si no, pide hacer clic en una
+  const iniciarClaseAsociacion = useCallback(() => {
+    const relacion = selectedEdge && edges.find((e) => e.id === selectedEdge.id);
+    if (relacion && admiteClaseAsociacion(relacion) && !claseAsociacionDe(relacion)) {
+      crearClaseAsociacionEn(relacion.id);
+      return;
+    }
+    setEligiendoRelacionAC((activo) => !activo);
+  }, [selectedEdge, edges, crearClaseAsociacionEn]);
 
-    // Calcular dimensiones basadas en CSS real de ClassNode
-    const calculateRealNodeDimensions = (node) => {
-      // Basado en el CSS actual: width: 340px, padding: 20px
-      const nodeWidth = 340;
-      const padding = 20;
-      const lineHeight = 22.4; // 1.4 * 16px (font-size: 1rem)
-      const titleHeight = 32; // font-size: 1.25rem + padding
-      const sectionTitleHeight = 18; // font-size: 1.125rem
-      const basePadding = 8;
-      
-      let totalHeight = padding * 2; // Top + bottom padding
-      totalHeight += titleHeight; // Title height
-      
-      const attributeCount = node.data?.attributes?.length || 0;
-      const methodCount = node.data?.methods?.length || 0;
-      
-      // Agregar altura de sección de atributos
-      if (attributeCount > 0) {
-        totalHeight += sectionTitleHeight + basePadding; // Section title
-        totalHeight += attributeCount * lineHeight; // Lines
-        totalHeight += basePadding; // Bottom spacing
-      }
-      
-      // Agregar altura de sección de métodos
-      if (methodCount > 0) {
-        totalHeight += sectionTitleHeight + basePadding; // Section title
-        totalHeight += methodCount * lineHeight; // Lines
-        totalHeight += basePadding; // Bottom spacing
-      }
-      
-      // Altura mínima
-      totalHeight = Math.max(totalHeight, 100);
-      
-      return { width: nodeWidth, height: totalHeight };
-    };
-    
-    const sourceDimensions = calculateRealNodeDimensions(sourceNode);
-    const targetDimensions = calculateRealNodeDimensions(targetNode);
-    
-    // SIMPLE: Calcular punto medio real entre los centros de los nodos conectados
-    const sourceCenterX = sourceNode.position.x + sourceDimensions.width / 2;
-    const sourceCenterY = sourceNode.position.y + sourceDimensions.height / 2;
-    const targetCenterX = targetNode.position.x + targetDimensions.width / 2;
-    const targetCenterY = targetNode.position.y + targetDimensions.height / 2;
-    
-    // Punto medio exacto donde debe aparecer la clase de asociación
-    const labelX = (sourceCenterX + targetCenterX) / 2;
-    const labelY = (sourceCenterY + targetCenterY) / 2;
-    
-    // USAR SIEMPRE el cálculo geométrico preciso en lugar del callback del edge
-    // Esto asegura que la línea punteada esté perfectamente centrada
-    const midX = labelX;  // Centro geométrico real
-    const midY = labelY;  // Centro geométrico real
-    
+  useEffect(() => {
+    if (!eligiendoRelacionAC) return undefined;
+    const alPulsar = (evento) => { if (evento.key === 'Escape') setEligiendoRelacionAC(false); };
+    window.addEventListener('keydown', alPulsar);
+    return () => window.removeEventListener('keydown', alPulsar);
+  }, [eligiendoRelacionAC]);
 
-    
+  /** Une una clase que ya existe a una relación, como su clase de asociación (panel de la clase). */
+  const vincularClaseExistente = useCallback((claseId, relacionId) => {
+    try {
+      aplicarTablero(vincularClaseAsociacion({ nodes, edges }, claseId, relacionId));
+    } catch (error) {
+      avisoClaseAsociacion(error.message);
+      return;
+    }
+    // "Guardar Clase" escribe lo que hay en el panel: tiene que llevar la marca nueva
+    setEditingData((prev) => (prev ? { ...prev, isAssociationClass: true, associatedEdgeId: relacionId } : prev));
+  }, [nodes, edges, aplicarTablero, setEditingData]);
 
-    
-    // Generar nombre único para la clase de asociación
-    const existingAssocClasses = nodes.filter(node => 
-      node.data?.className?.startsWith('ClaseAsociacion')
-    );
-    const newClassName = `ClaseAsociacion${existingAssocClasses.length + 1}`;
+  /** La relación deja de tener clase de asociación; la clase queda como una clase común. */
+  const quitarClaseAsociacion = useCallback((relacionId) => {
+    aplicarTablero(desvincularClaseAsociacion({ nodes, edges }, relacionId));
+    setEditingData((prev) => {
+      if (!prev?.isAssociationClass || prev.associatedEdgeId !== relacionId) return prev;
+      const { isAssociationClass, associatedEdgeId, ...resto } = prev;
+      return resto;
+    });
+    setEditingEdge((prev) => {
+      if (!prev?.hasAssociationClass || selectedEdge?.id !== relacionId) return prev;
+      const { hasAssociationClass, associationClassNodeId, associationClassId, ...resto } = prev;
+      return resto;
+    });
+  }, [nodes, edges, aplicarTablero, setEditingData, setEditingEdge, selectedEdge]);
 
-    // Crear la nueva clase de asociación CENTRADA sobre el punto medio
-    const newAssociationNode = {
-      id: `assoc-node-${Date.now()}`,
-      position: { x: midX - 170, y: midY - 90 }, // Centrada sobre el punto medio
-      type: "classNode",
-      data: {
-        className: newClassName,
-        attributes: ["atributoAsociacion: string"],
-        methods: ["operacionAsociacion(): void"],
-        isAssociationClass: true,
-        associatedEdgeId: selectedEdge.id
-      },
-    };
-
-
-
-    // Crear edge punteado de asociación (hacia el punto AC calculado, no un nodo)
-    const associationEdge = {
-      id: `assoc-edge-${Date.now()}`,
-      source: newAssociationNode.id,
-      sourceHandle: 'bottom',
-      target: selectedEdge.target, // Conectar al nodo target, pero visualmente será hacia el AC
-      targetHandle: 'top-center', // Usar handle válido
-      type: 'umlEdge',
-      style: {
-        strokeDasharray: '5,5',
-        stroke: '#dc2626', // Rojo para la conexión de AC
-        strokeWidth: 2,
-        pointerEvents: 'none'
-      },
-      data: {
-        type: 'AssociationClassConnection',
-        isAssociationConnection: true,
-        parentRelationId: selectedEdge.id,
-        label: '',
-        acTargetX: midX, // Coordenadas donde debería terminar visualmente
-        acTargetY: midY
-      }
-    };
-    
-
-
-    // Actualizar el edge original para marcar que tiene clase de asociación
-    const updatedSelectedEdge = {
-      ...selectedEdge,
-      data: {
-        ...selectedEdge.data,
-        associationClassId: newAssociationNode.id,
-        hasAssociationClass: true,
-        associationClassNodeId: newAssociationNode.id
-      }
-    };
-
-    // Actualizar arrays (solo agregar clase de asociación, no relation-center)
-    const updatedNodes = [...nodes, newAssociationNode];
-    const updatedEdges = [
-      ...edges.map(edge => edge.id === selectedEdge.id ? updatedSelectedEdge : edge),
-      associationEdge
-    ];
-
-    // Aplicar cambios
-    setNodes(updatedNodes);
-    setEdges(updatedEdges);
-    await updateBoardData(updatedNodes, updatedEdges);
-
-  }, [selectedEdge, nodes, edges, setNodes, setEdges, updateBoardData]);
+  // Lo que muestran los paneles de la clase y de la relación seleccionadas
+  const claseAsociacionSeleccion = useMemo(() => {
+    const info = { relacionDeClase: null, relacionesParaVincular: [], claseDeRelacion: null };
+    const nodo = selectedNode && nodes.find((n) => n.id === selectedNode.id);
+    if (nodo) {
+      const relacion = nodo.data?.isAssociationClass && edges.find((e) => e.id === nodo.data.associatedEdgeId);
+      if (relacion) info.relacionDeClase = { id: relacion.id, etiqueta: describirRelacion(nodes, relacion) };
+      else if (puedeSerClaseAsociacion(nodo)) info.relacionesParaVincular = relacionesParaClase(nodes, edges, nodo.id);
+    }
+    const relacion = selectedEdge && edges.find((e) => e.id === selectedEdge.id);
+    const clase = relacion && nodes.find((n) => n.id === claseAsociacionDe(relacion));
+    if (clase) info.claseDeRelacion = { id: clase.id, nombre: clase.data?.className || 'Clase' };
+    return info;
+  }, [nodes, edges, selectedNode, selectedEdge]);
 
   // Editar/Eliminar tablero (usa endpoints backend: PUT /apis/sala/:id y DELETE /apis/sala/:id)
   
@@ -1585,6 +1508,11 @@ const BoardPage = () => {
       updateNodeData={updateNodeData}
       updateEdgeData={updateEdgeData}
       handleCreateAssociationClass={handleCreateAssociationClass}
+      iniciarClaseAsociacion={iniciarClaseAsociacion}
+      eligiendoRelacionAC={eligiendoRelacionAC}
+      claseAsociacionSeleccion={claseAsociacionSeleccion}
+      vincularClaseExistente={vincularClaseExistente}
+      quitarClaseAsociacion={quitarClaseAsociacion}
       setSelectedEdge={setSelectedEdge}
       setEditingEdge={setEditingEdge}
     />
@@ -1605,6 +1533,12 @@ const BoardPage = () => {
         <div className="px-3 py-1.5 text-xs bg-amber-100 text-amber-900 border-b border-amber-200 flex justify-between gap-2">
           <span>{avisoSincronia}</span>
           <button onClick={cerrarAvisoSincronia} aria-label="Cerrar aviso">✕</button>
+        </div>
+      )}
+      {eligiendoRelacionAC && (
+        <div className="px-3 py-1.5 text-xs bg-indigo-100 text-indigo-900 border-b border-indigo-200 flex justify-between gap-2">
+          <span>🔗 Haz clic en la línea de la asociación entre las dos clases: se le agrega una clase de asociación.</span>
+          <button onClick={() => setEligiendoRelacionAC(false)} className="font-semibold hover:underline">Cancelar (Esc)</button>
         </div>
       )}
       {currentUser && !conectado && !errorAcceso && (
@@ -1830,7 +1764,15 @@ const BoardPage = () => {
           onEdgesChange={alCambiarAristas}
           onConnect={onConnect}
           onNodeClick={(_, node) => { if (!esFantasma(node.id)) handleNodeSelection(nodes.find((n) => n.id === node.id) || node); }}
-          onEdgeClick={(_, edge) => { if (!esFantasma(edge.id)) handleEdgeSelection(edges.find((e) => e.id === edge.id) || edge); }}
+          onEdgeClick={(_, edge) => {
+            if (esFantasma(edge.id)) return;
+            if (eligiendoRelacionAC) {
+              setEligiendoRelacionAC(false);
+              crearClaseAsociacionEn(edge.id);
+              return;
+            }
+            handleEdgeSelection(edges.find((e) => e.id === edge.id) || edge);
+          }}
           nodeTypes={nodeTypes}
           edgeTypes={edgeTypes}
           defaultEdgeOptions={defaultEdgeOptions}
@@ -1858,23 +1800,12 @@ const BoardPage = () => {
           onQuitarMarcas={() => setRevisionOcultaId(colaboracion.ultimaRevision?.id ?? null)}
           abierto={chatAbierto}
           setAbierto={setChatAbierto}
+          enLinea={!!socketUnido}
+          iaLocal={iaLocal}
         />
       )}
 
       {/* Burbuja de herramientas */}
-      {/* IA individual: solo sin conexión con el servidor (IA local del navegador). Con conexión, toda
-          la IA pasa por el chat del equipo: una sola IA, a la vista de todos y con propuestas. */}
-      {!socketUnido && !errorAcceso && (
-      <AiBubble
-        boardId={boardId}
-        nodes={nodes}
-        edges={edges}
-        setNodes={setNodes}
-        setEdges={setEdges}
-        updateBoardData={updateBoardData}
-        onAiModificationChange={setAiModificationActive}
-      />
-      )}
 
       <BurbujaHerramientasDiagrama
         nodes={nodes}

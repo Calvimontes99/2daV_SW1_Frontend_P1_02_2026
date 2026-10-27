@@ -4,6 +4,7 @@ import { applyNodeChanges, applyEdgeChanges } from '@xyflow/react';
 import { guardarSincronia, leerSincronia, olvidarCopia } from '../offline/almacenTableros.js';
 import { opsEntre } from '../utils/operacionesDiagrama.js';
 import { Sincronia, conservarTransitorios } from '../utils/sincronia.js';
+import { normalizarClasesAsociacion } from '../utils/claseAsociacion.js';
 
 /**
  * useSocketFlow: el tablero sincronizado en tiempo real con Socket.IO.
@@ -136,14 +137,17 @@ export const useSocketFlow = (boardId, currentUser = null, options = {}) => {
   };
 
   /** Cambio del usuario: se calcula la diferencia con la vista actual y sale como operaciones. */
-  const cambiarLocal = useCallback((nueva) => {
+  /** @param {{origen?: 'ia-local'}} opciones  origen: los cambios los hizo la IA local (van aparte) */
+  const cambiarLocal = useCallback((propuesta, opciones = {}) => {
+    // Borrar una clase de asociación o su relación (por cualquier camino) no deja marcas sueltas
+    const nueva = normalizarClasesAsociacion(propuesta);
     const ops = opsEntre(vistaRef.current, nueva);
     vistaRef.current = nueva;
     setNodesVista(nueva.nodes);
     setEdgesVista(nueva.edges);
     if (!ops.length) return; // selección, medidas, arrastre sin mover: solo de esta pantalla
     pushDebugEvent('operaciones.locales', { cantidad: ops.length, tipos: [...new Set(ops.map(o => o.op))] });
-    syncRef.current.local(ops);
+    syncRef.current.local(ops, opciones);
     persistir();
     programarEnvio();
   }, [persistir, programarEnvio, pushDebugEvent]);
@@ -421,6 +425,8 @@ export const useSocketFlow = (boardId, currentUser = null, options = {}) => {
     consumirCambioRemoto,
     setNodes,
     setEdges,
+    // Cambios de la IA local: quedan en el historial como de la IA (pedido por quien la usó)
+    aplicarCambiosIA: (nodes, edges) => cambiarLocal({ nodes: nodes || [], edges: edges || [] }, { origen: 'ia-local' }),
     updateActiveUsers,
     cleanupActiveUser,
     getDebugEvents: () => lastEventsRef.current,

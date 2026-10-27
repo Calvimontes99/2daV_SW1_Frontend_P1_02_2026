@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { Sincronia, conservarTransitorios, MAX_POR_TANDA } from '../src/utils/sincronia.js';
 import { aplicarOps, opsEntre } from '../src/utils/operacionesDiagrama.js';
+import { normalizarClasesAsociacion } from '../src/utils/claseAsociacion.js';
 import { deshacerSelectivo } from '../src/utils/deshacerSelectivo.js';
 import { fusionarPorId } from '../src/utils/fusionHistorial.js';
 import { leerSincronia } from '../src/offline/almacenTableros.js';
@@ -120,7 +121,7 @@ test('6) "Guardar" espera a que el servidor confirme todas las tandas antes de e
   };
   const estados = []; const efectos = [];
   const contexto = {
-    console, env: {}, Sincronia, conservarTransitorios, opsEntre, URLSearchParams,
+    console, env: {}, Sincronia, conservarTransitorios, opsEntre, normalizarClasesAsociacion, URLSearchParams,
     window: { location: { origin: 'http://prueba.invalid', search: '', pathname: '/board/1' }, history: { replaceState() {} }, addEventListener() {}, removeEventListener() {} },
     document: { cookie: '' }, localStorage: { getItem() { return null; } },
     leerSincronia() { return null; }, guardarSincronia() { return true; }, olvidarCopia() {},

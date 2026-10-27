@@ -1,12 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import Swal from 'sweetalert2';
 import { canalDe, mencionaALaIA } from '../utils/canalesChat.js';
+import { SUGERENCIAS_SIN_CONEXION } from '../utils/respuestaIALocal.js';
+import PanelIALocal from './PanelIALocal';
 
 /**
  * Chats de la sala, en un mismo panel flotante: el del equipo (entre personas) y el de la IA
  * compartida, un integrante más. En el de la IA todos ven todo: lo que se le pide, lo que
  * responde y lo que propone. Los cambios de la IA llegan como propuesta, que
  * cualquiera acepta o rechaza. También muestra el historial de quién hizo cada cambio.
+ *
+ * Sin conexión con el servidor es el MISMO panel: la pestaña de la IA usa la IA local de este
+ * equipo (sus cambios se aplican enseguida) y lo que se escribe queda pendiente. Al volver la
+ * conexión todo se comparte con la sala, así el equipo sabe qué se hizo sin conexión.
  */
 
 const hora = (fecha) => new Date(fecha).toLocaleTimeString('es-BO', { hour: '2-digit', minute: '2-digit' });
@@ -79,19 +85,24 @@ const TarjetaPropuesta = ({ propuesta, onDecidir, onAjustar }) => {
   );
 };
 
-const Mensaje = ({ m, propio, propuesta, onDecidir, onAjustar, onEnfocarClase, onQuitarMarcas, onAplicarIdea }) => {
+const Mensaje = ({ m, propio, usuarioId, propuesta, onDecidir, onAjustar, onEnfocarClase, onQuitarMarcas, onAplicarIdea }) => {
   if (m.tipo === 'sistema') {
     return <div className="text-center text-[11px] text-gray-500 px-4 py-1"><Texto texto={m.texto} /></div>;
   }
   const esIA = m.tipo === 'ia';
   const d = m.datos || {};
+  const deIALocal = esIA && (d.proveedor === 'IA local' && d.sinConexion);
+  // De otra persona, hecho sin conexión: se aclara de quién era la IA local
+  const ajeno = deIALocal && d.pedidoPor && !d.pendiente && String(d.pedidoPorId) !== String(usuarioId);
   return (
     <div className={`flex ${propio ? 'justify-end' : 'justify-start'}`}>
       <div className={`max-w-[88%] rounded-xl px-3 py-2 text-sm shadow-sm ${esIA ? 'bg-violet-50 border border-violet-200' : propio ? 'bg-blue-600 text-white' : 'bg-white border border-gray-200'}`}>
         <div className={`flex items-center gap-2 text-[11px] mb-0.5 ${propio ? 'text-blue-100' : 'text-gray-500'}`}>
-          <span className="font-semibold">{esIA ? '🤖 IA' : propio ? 'Tú' : m.autorNombre}</span>
-          <span>{hora(m.creadoEn)}</span>
-          {esIA && d.proveedor && <span className="px-1 rounded bg-violet-100 text-violet-700">{d.proveedor}</span>}
+          <span className="font-semibold">{deIALocal ? `💻 IA local${ajeno ? ` de ${d.pedidoPor}` : ''}` : esIA ? '🤖 IA' : propio ? 'Tú' : m.autorNombre}</span>
+          <span>{hora(d.escritoEn || m.creadoEn)}</span>
+          {esIA && d.proveedor && !deIALocal && <span className="px-1 rounded bg-violet-100 text-violet-700">{d.proveedor}</span>}
+          {d.pendiente && <span className={`px-1 rounded ${propio ? 'bg-blue-500' : 'bg-amber-100 text-amber-800'}`} title="Se compartirá con el equipo al volver la conexión">⏳ al volver</span>}
+          {d.sinConexion && !d.pendiente && <span className={`px-1 rounded ${propio ? 'bg-blue-500' : 'bg-gray-100 text-gray-600'}`} title="Escrito sin conexión">📴 sin conexión</span>}
           {!esIA && d.paraIA && <span className={`px-1 rounded ${propio ? 'bg-blue-500' : 'bg-violet-100 text-violet-700'}`}>para la IA</span>}
           {!esIA && d.imagen && <span title={d.imagen.nombre}>📷</span>}
           {!esIA && d.deAudio && <span title="Transcrito de un audio">🎙️</span>}
@@ -152,7 +163,7 @@ const Historial = ({ cambios }) => {
         <div key={c.id} className="text-xs border-l-2 pl-2 py-0.5" style={{ borderColor: c.esIA ? '#8b5cf6' : '#3b82f6' }}>
           <div className="text-gray-500">{diaYHora(c.creadoEn)}</div>
           <div>
-            <strong>{c.esIA ? '🤖 IA' : c.autorNombre}</strong>
+            <strong>{c.esIA ? (c.autorNombre === 'IA local' ? '💻 IA local' : '🤖 IA') : c.autorNombre}</strong>
             {c.esIA && <span className="text-gray-500"> (pedido por {c.pedidoPor}{c.aprobadoPor ? `, aprobado por ${c.aprobadoPor}` : ''})</span>}
             {' '}{c.resumen}
           </div>
@@ -225,11 +236,19 @@ const PESTANAS = [
   ['historial', '🕑 Quién hizo qué'],
 ];
 
-export default function ChatSala({ colaboracion, currentUser, onEnfocarClase, onQuitarMarcas, abierto, setAbierto }) {
+/**
+ * @param {boolean} enLinea  hay conexión con el servidor (si no, trabaja la IA local)
+ * @param {{pedir, leerImagen, transcribir}} iaLocal  la IA local de este equipo (hooks/useIALocal)
+ */
+export default function ChatSala({ colaboracion, currentUser, onEnfocarClase, onQuitarMarcas, abierto, setAbierto, enLinea = true, iaLocal = null }) {
   const {
     mensajes, propuestas, estadoIA, cambios, bienvenida, sinLeer, hayAnteriores,
-    enviar, enviarAdjunto, cargarAnteriores, decidir, cerrarBienvenida, marcarLeidos,
+    enviar, enviarAdjunto, cargarAnteriores, decidir, cerrarBienvenida, marcarLeidos, agregarSinConexion, pendientes = 0,
   } = colaboracion;
+  // Panel de la IA local (modelos, Ollama) y la IA local trabajando en un pedido
+  const [panelLocal, setPanelLocal] = useState(false);
+  const [trabajandoLocal, setTrabajandoLocal] = useState(false);
+  const sinConexion = !enLinea;
   const [pestana, setPestana] = useState('equipo');
   const [texto, setTexto] = useState('');
   const [enviando, setEnviando] = useState(false);
@@ -259,11 +278,63 @@ export default function ChatSala({ colaboracion, currentUser, onEnfocarClase, on
     if (p !== 'ia') { setAjustando(null); if (adjunto?.tipo === 'imagen') setAdjunto(null); }
   };
 
+  /**
+   * Sin conexión: el mensaje queda pendiente; si es para la IA, la IA local lo resuelve aquí mismo
+   * (sus cambios se aplican enseguida) y su respuesta también queda para compartir al volver.
+   */
+  const mandarSinConexion = async (paraIA, limpio) => {
+    if (!agregarSinConexion) return;
+    let pedido = limpio;
+    let deAudio = false;
+    setEnviando(true);
+    try {
+      if (adjunto?.tipo === 'audio') {
+        const transcripcion = iaLocal ? await iaLocal.transcribir(adjunto.archivo) : null;
+        if (transcripcion === null) {
+          Swal.fire({ icon: 'info', title: 'Falta el modelo de voz', text: 'Para usar audio sin conexión, descarga el modelo de voz en 💻 IA local (una sola vez, con internet).' });
+          setPanelLocal(true);
+          return;
+        }
+        if (!transcripcion.trim()) {
+          Swal.fire({ icon: 'info', title: 'No se entendió el audio', text: 'Graba de nuevo hablando cerca del micrófono.' });
+          return;
+        }
+        pedido = [limpio, transcripcion.trim()].filter(Boolean).join(' ');
+        deAudio = true;
+      }
+      const imagen = adjunto?.tipo === 'imagen' ? adjunto.archivo : null;
+      const canal = paraIA ? 'ia' : 'equipo';
+      agregarSinConexion({
+        canal, tipo: 'usuario',
+        texto: pedido || (imagen ? 'Pásale esta imagen al diagrama.' : ''),
+        datos: { ...(paraIA ? { paraIA: true } : {}), ...(deAudio ? { deAudio: true } : {}), ...(imagen ? { imagen: { nombre: imagen.name } } : {}) },
+      });
+      setTexto('');
+      setAdjunto(null);
+      if (!paraIA) return;
+      if (!deIA) setPestana('ia');
+      if (!iaLocal) return;
+      setTrabajandoLocal(true);
+      try {
+        const r = imagen ? await iaLocal.leerImagen(imagen, pedido) : await iaLocal.pedir(pedido);
+        agregarSinConexion({ canal: 'ia', tipo: 'ia', texto: r.texto, datos: r.datos });
+        if (r.abrirPanel) setPanelLocal(true);
+      } catch (error) {
+        agregarSinConexion({ canal: 'ia', tipo: 'ia', texto: `La IA local no pudo responder: ${error?.message || 'error desconocido'}.`, datos: { motor: 'error', cambios: 0 } });
+      } finally {
+        setTrabajandoLocal(false);
+      }
+    } finally {
+      setEnviando(false);
+    }
+  };
+
   const mandar = async () => {
     const limpio = texto.trim();
-    if ((!limpio && !adjunto) || enviando) return;
+    if ((!limpio && !adjunto) || enviando || trabajandoLocal) return;
     // En el chat del equipo, mencionar a @IA también le pide algo (el mensaje va al chat de la IA)
     const paraIA = deIA || mencionaALaIA(limpio);
+    if (sinConexion) { await mandarSinConexion(paraIA, limpio); return; }
     setEnviando(true);
     const r = adjunto
       ? await enviarAdjunto({ texto: limpio, paraIA, [adjunto.tipo === 'imagen' ? 'imagen' : 'audio']: adjunto.archivo })
@@ -308,8 +379,9 @@ export default function ChatSala({ colaboracion, currentUser, onEnfocarClase, on
         title="Chat del equipo y chat con la IA del equipo"
         data-tour="chat-sala"
       >
-        💬 Equipo + 🤖 IA
-        {estadoIA.ocupada && <span className="animate-pulse">…</span>}
+        💬 Equipo + {sinConexion ? '💻 IA local' : '🤖 IA'}
+        {sinConexion && <span title="Sin conexión con el servidor">📴</span>}
+        {(estadoIA.ocupada || trabajandoLocal) && <span className="animate-pulse">…</span>}
         {totalSinLeer > 0 && <span className="rounded-full bg-white px-1.5 text-xs font-bold text-violet-700">{totalSinLeer}</span>}
       </button>
     );
@@ -333,10 +405,31 @@ export default function ChatSala({ colaboracion, currentUser, onEnfocarClase, on
             </button>
           ))}
         </div>
-        <button onClick={() => setAbierto(false)} className="rounded px-2 hover:bg-white/10" aria-label="Cerrar chat">✕</button>
+        <div className="flex items-center gap-1">
+          {/* Con conexión solo se PREPARA (descargas, Ollama): la IA local responde sin conexión */}
+          <button
+            onClick={() => setPanelLocal((v) => !v)}
+            className={`rounded px-2 py-0.5 text-xs ${panelLocal ? 'bg-white/30' : 'hover:bg-white/10'}`}
+            title={sinConexion ? 'Modelos de la IA local de este equipo' : 'Preparar la IA local para trabajar sin internet (Ollama y modelos)'}
+          >{sinConexion ? '💻 IA local' : '💻'}</button>
+          <button onClick={() => setAbierto(false)} className="rounded px-2 hover:bg-white/10" aria-label="Cerrar chat">✕</button>
+        </div>
       </div>
+      {sinConexion && (
+        <div className="border-b border-amber-200 bg-amber-50 px-3 py-1.5 text-[11px] text-amber-900">
+          📴 Sin conexión con el servidor. La IA local trabaja en este equipo y sus cambios se aplican enseguida.
+          Lo que escribas y lo que haga se compartirá con el equipo al volver{pendientes ? ` (${pendientes} pendiente${pendientes === 1 ? '' : 's'})` : ''}.
+        </div>
+      )}
+      {!sinConexion && pendientes > 0 && (
+        <div className="border-b border-sky-200 bg-sky-50 px-3 py-1 text-[11px] text-sky-900">Compartiendo con el equipo lo escrito sin conexión…</div>
+      )}
 
-      {pestana === 'historial' ? <Historial cambios={cambios} /> : (
+      {panelLocal ? (
+        <div className="flex-1 overflow-y-auto bg-white">
+          <PanelIALocal onCerrar={() => setPanelLocal(false)} onCambio={() => {}} />
+        </div>
+      ) : pestana === 'historial' ? <Historial cambios={cambios} /> : (
         <>
           {bienvenida && (
             <div className="m-2 rounded-lg border border-sky-200 bg-sky-50 p-2 text-xs text-sky-900">
@@ -352,7 +445,13 @@ export default function ChatSala({ colaboracion, currentUser, onEnfocarClase, on
                 <button onClick={() => cargarAnteriores(pestana)} className="text-xs text-violet-700 underline">Cargar mensajes anteriores</button>
               </div>
             )}
-            {!visibles.length && (deIA ? (
+            {!visibles.length && (deIA && sinConexion ? (
+              <div className="mt-6 text-center text-xs text-gray-500">
+                <p className="text-2xl">💻</p>
+                <p className="mt-1">Sin conexión trabaja la IA local de este equipo: entiende órdenes como "agrega la clase Producto con nombre y precio".</p>
+                <p className="mt-1">Con un modelo descargado (💻 IA local) entiende pedidos libres y lee fotos con Ollama.</p>
+              </div>
+            ) : deIA ? (
               <div className="mt-6 text-center text-xs text-gray-500">
                 <p className="text-2xl">🤖</p>
                 <p className="mt-1">La IA es un integrante más del equipo: todos ven lo que le piden y lo que responde.</p>
@@ -370,6 +469,7 @@ export default function ChatSala({ colaboracion, currentUser, onEnfocarClase, on
                 key={m.id}
                 m={m}
                 propio={m.tipo === 'usuario' && currentUser && String(m.autorId) === String(currentUser.id)}
+                usuarioId={currentUser?.id}
                 propuesta={m.datos?.propuesta?.id ? propuestaPorId.get(m.datos.propuesta.id) : null}
                 onDecidir={decidir}
                 onAjustar={ajustar}
@@ -378,7 +478,10 @@ export default function ChatSala({ colaboracion, currentUser, onEnfocarClase, on
                 onAplicarIdea={aplicarIdea}
               />
             ))}
-            {deIA && estadoIA.ocupada && (
+            {deIA && trabajandoLocal && (
+              <div className="text-xs text-violet-700 animate-pulse">💻 La IA local está trabajando en este equipo…</div>
+            )}
+            {deIA && !sinConexion && estadoIA.ocupada && (
               <div className="text-xs text-violet-700 animate-pulse">
                 🤖 La IA está atendiendo a {estadoIA.atendiendoA}…{estadoIA.enCola > 0 ? ` (${estadoIA.enCola} en cola)` : ''}
               </div>
@@ -388,7 +491,7 @@ export default function ChatSala({ colaboracion, currentUser, onEnfocarClase, on
           <div className="border-t bg-white p-2">
             {deIA && (
               <div className="mb-1.5 flex flex-wrap gap-1">
-                {SUGERENCIAS.map(([etiqueta, pedido]) => (
+                {(sinConexion ? SUGERENCIAS_SIN_CONEXION.map((s) => [s, s]) : SUGERENCIAS).map(([etiqueta, pedido]) => (
                   <button key={etiqueta} onClick={() => setTexto(pedido)} className="rounded-full border border-violet-200 px-2 py-0.5 text-[11px] text-violet-800 hover:bg-violet-50">{etiqueta}</button>
                 ))}
               </div>
@@ -416,18 +519,20 @@ export default function ChatSala({ colaboracion, currentUser, onEnfocarClase, on
               }}
               rows={2}
               maxLength={4000}
-              placeholder={ajustando ? 'Qué cambiar de la propuesta…' : deIA ? 'Pídele algo a la IA (todo el equipo lo ve)…' : 'Escribe al equipo…'}
+              placeholder={ajustando ? 'Qué cambiar de la propuesta…'
+                : deIA ? (sinConexion ? 'Pídele algo a la IA local (se compartirá al volver)…' : 'Pídele algo a la IA (todo el equipo lo ve)…')
+                  : (sinConexion ? 'Escribe al equipo (se enviará al volver)…' : 'Escribe al equipo…')}
               className="w-full resize-none rounded-lg border border-gray-300 px-2 py-1.5 text-sm focus:border-violet-500 focus:outline-none"
             />
             <div className="mt-1.5 flex gap-1.5">
               <input ref={archivoRef} type="file" accept={deIA ? 'image/*,audio/*' : 'audio/*'} className="hidden" onChange={elegirArchivo} />
               <button onClick={() => archivoRef.current?.click()} className="rounded-lg border border-gray-300 px-2 text-sm hover:bg-gray-50" title={deIA ? 'Adjuntar una foto (pizarra, captura) o un audio' : 'Adjuntar un audio (se transcribe)'}>📎</button>
-              <button onClick={dictado.alternar} className={`rounded-lg border px-2 text-sm ${dictado.escuchando ? 'border-red-400 bg-red-50 text-red-700 animate-pulse' : 'border-gray-300 hover:bg-gray-50'}`} title="Dictar con la voz (se escribe en el cuadro)">🎤</button>
+              {!sinConexion && <button onClick={dictado.alternar} className={`rounded-lg border px-2 text-sm ${dictado.escuchando ? 'border-red-400 bg-red-50 text-red-700 animate-pulse' : 'border-gray-300 hover:bg-gray-50'}`} title="Dictar con la voz (se escribe en el cuadro)">🎤</button>}
               <button onClick={grabadora.alternar} className={`rounded-lg border px-2 text-sm ${grabadora.grabando ? 'border-red-400 bg-red-50 text-red-700 animate-pulse' : 'border-gray-300 hover:bg-gray-50'}`} title={grabadora.grabando ? 'Terminar la grabación' : 'Grabar un audio (se transcribe)'}>{grabadora.grabando ? '⏹' : '🎙️'}</button>
               {deIA ? (
-                <button onClick={mandar} disabled={(!texto.trim() && !adjunto) || enviando} className="flex-1 rounded-lg bg-violet-600 px-2 py-1.5 text-sm text-white hover:bg-violet-700 disabled:opacity-40">🤖 Pedir a la IA</button>
+                <button onClick={mandar} disabled={(!texto.trim() && !adjunto) || enviando || trabajandoLocal} className="flex-1 rounded-lg bg-violet-600 px-2 py-1.5 text-sm text-white hover:bg-violet-700 disabled:opacity-40">{sinConexion ? '💻 Pedir a la IA local' : '🤖 Pedir a la IA'}</button>
               ) : (
-                <button onClick={mandar} disabled={(!texto.trim() && !adjunto) || enviando} className="flex-1 rounded-lg bg-gray-800 px-2 py-1.5 text-sm text-white hover:bg-gray-900 disabled:opacity-40">Enviar al equipo</button>
+                <button onClick={mandar} disabled={(!texto.trim() && !adjunto) || enviando} className="flex-1 rounded-lg bg-gray-800 px-2 py-1.5 text-sm text-white hover:bg-gray-900 disabled:opacity-40">{sinConexion ? 'Enviar al volver' : 'Enviar al equipo'}</button>
               )}
             </div>
           </div>

@@ -10,6 +10,7 @@
 
 import { formatearAtributo, formatearMetodo } from './umlParser.js';
 import { distribuirNodos } from './distribucionImportada.js';
+import { vincularClaseAsociacion } from './claseAsociacion.js';
 
 /** EA guarda "1..1" o "0..*"; el editor usa "1" y "*". */
 export const normalizarCardinalidad = (valor) => {
@@ -27,6 +28,7 @@ const estereotipoDe = (clase) => {
 };
 
 const idNodo = (id) => `node-eap-${id}`;
+const idArista = (id) => `edge-eap-${id}`;
 
 /**
  * @param {{paquetes, clases, conectores, diagramas}} modelo respuesta del backend
@@ -123,7 +125,7 @@ export const prepararImportacionEAP = (modelo) => {
           if (k.agregadoOrigen > 0 && k.agregadoDestino === 0) [origen, destino] = [destino, origen];
         }
         return {
-          id: `edge-eap-${k.id}`,
+          id: idArista(k.id),
           source: idNodo(origen.clase),
           target: idNodo(destino.clase),
           type: 'umlEdge',
@@ -138,7 +140,20 @@ export const prepararImportacionEAP = (modelo) => {
         };
       });
 
-    return { nodes: distribuirNodos(nodes), edges, titulo: diagrama?.nombre || null };
+    // Clases de asociación (NType 17 en EA): la clase se une a su relación con la línea punteada
+    let tablero = { nodes: distribuirNodos(nodes), edges };
+    conectores
+      .filter((k) => k.claseAsociacion && incluidas.has(k.claseAsociacion))
+      .filter((k) => tablero.edges.some((e) => e.id === idArista(k.id)))
+      .forEach((k) => {
+        try {
+          tablero = vincularClaseAsociacion(tablero, idNodo(k.claseAsociacion), idArista(k.id));
+        } catch {
+          // No es una combinación válida en el editor (p. ej. una interfaz): queda como clase común
+        }
+      });
+
+    return { ...tablero, titulo: diagrama?.nombre || null };
   };
 
   return { opciones, construir };

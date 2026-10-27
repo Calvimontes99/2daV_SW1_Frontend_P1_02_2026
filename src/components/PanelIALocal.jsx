@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import GuiaOllama from './GuiaOllama';
 import {
   CATALOGO_TEXTO, CATALOGO_VOZ, NOMBRE_NIVEL, configuracionDeTexto, configuracionDeVoz,
   detectarCapacidades, guardarPreferenciasIA, nivelActual, preferenciasIA, textoRecomendado,
@@ -8,7 +9,7 @@ import { modeloDescargado, prepararModelo } from '../ia-local/motorIA.js';
 import { iaNubeDisponible, olvidarEstadoNube } from '../ia-local/asistenteLocal.js';
 import { EJEMPLOS_ORDENES } from '../ia-local/interpreteOrdenes.js';
 import {
-  estadoOllama, guionInstalacion, modeloOllamaPorDefecto, modeloSugeridoOllama, modeloVistaSugerido, olvidarEstadoOllama,
+  estadoOllama, modeloOllamaPorDefecto, olvidarEstadoOllama,
 } from '../ia-local/ollama.js';
 
 const mb = (bytes) => `${Math.round((bytes || 0) / 1048576)} MB`;
@@ -28,49 +29,6 @@ export default function PanelIALocal({ onCerrar, onCambio }) {
   const [ollama, setOllama] = useState(null);
   const [motorTexto, setMotorTexto] = useState(preferenciasIA().motorTexto || 'auto');
   const [modeloOllama, setModeloOllama] = useState(preferenciasIA().modeloOllama || '');
-  const [copiado, setCopiado] = useState(null);
-
-  /** Enlace de descarga según el sistema operativo del equipo. */
-  const descargaOllama = () => {
-    const s = navigator.userAgent;
-    if (/Windows/i.test(s)) return 'https://ollama.com/download/OllamaSetup.exe';
-    if (/Mac/i.test(s)) return 'https://ollama.com/download/Ollama-darwin.zip';
-    return 'https://ollama.com/download';
-  };
-
-  /**
-   * Descarga un instalador listo para ejecutar. El navegador no puede instalar programas por sí
-   * mismo, así que entrega este archivo: al abrirlo instala Ollama, autoriza esta página y
-   * descarga el modelo que corresponde a este equipo.
-   */
-  const descargarInstalador = () => {
-    const windows = /Windows/i.test(navigator.userAgent);
-    const guion = guionInstalacion({
-      origen: window.location.origin,
-      modelo: modeloSugeridoOllama(capacidades),
-      // Segundo modelo: el que lee una foto del diagrama cuando no hay internet
-      modeloVista: modeloVistaSugerido(capacidades),
-      windows,
-    });
-    const url = URL.createObjectURL(new Blob([guion.contenido], { type: `${guion.tipo};charset=utf-8` }));
-    const enlace = document.createElement('a');
-    enlace.href = url;
-    enlace.download = guion.nombre;
-    document.body.appendChild(enlace);
-    enlace.click();
-    document.body.removeChild(enlace);
-    setTimeout(() => URL.revokeObjectURL(url), 10000);
-  };
-
-  const copiar = async (texto, que) => {
-    try {
-      await navigator.clipboard.writeText(texto);
-      setCopiado(que);
-      setTimeout(() => setCopiado(null), 4000);
-    } catch {
-      setCopiado(null);
-    }
-  };
 
   const opcionTexto = CATALOGO_TEXTO.find((o) => o.clave === claveTexto) || null;
   const opcionVoz = CATALOGO_VOZ.find((o) => o.clave === claveVoz) || null;
@@ -295,6 +253,7 @@ export default function PanelIALocal({ onCerrar, onCambio }) {
         </div>
 
         {ollama === null && <div className="text-xs text-gray-500">Comprobando…</div>}
+        <GuiaOllama ollama={ollama} capacidades={capacidades} onComprobar={revisarOllama} />
 
         {ollama?.disponible && (
           <>
@@ -331,93 +290,12 @@ export default function PanelIALocal({ onCerrar, onCambio }) {
               </>
             ) : (
               <div className="text-xs text-amber-700">
-                Ollama está corriendo pero no tiene modelos. Descarga uno desde la terminal, por ejemplo:
-                <code className="block mt-1 p-1 bg-gray-100 rounded text-gray-800">ollama pull llama3.2</code>
+                Ollama está corriendo pero no tiene modelos: usa «Solo modelos» en la guía de arriba.
               </div>
             )}
           </>
         )}
 
-        {ollama && !ollama.disponible && (
-          <div className="text-xs text-gray-600 space-y-2">
-            <div>No se detectó Ollama en este equipo ({ollama.motivo}). Es opcional: sin él se usa el modelo del navegador.</div>
-
-            {ollama.bloqueoDelNavegador && (
-              <div className="p-2 rounded bg-amber-50 border border-amber-200 text-amber-900">
-                <div className="font-semibold">Puede que Ollama sí esté corriendo y el navegador lo esté bloqueando</div>
-                <div className="mt-1">
-                  Esta página está en internet y, por seguridad, el navegador no deja que hable con programas de tu
-                  equipo hasta que le des permiso. Haz clic en el <strong>candado</strong> de la barra de direcciones →
-                  <strong> Configuración del sitio</strong> → <strong>Acceso a la red local</strong> → <strong>Permitir</strong>,
-                  recarga la página y vuelve a comprobar. Si no aparece esa opción, tu navegador aún no lo admite: usa el
-                  modelo del navegador, que no necesita permisos.
-                </div>
-              </div>
-            )}
-
-            <div className="flex flex-wrap gap-2">
-              <button
-                type="button"
-                onClick={descargarInstalador}
-                className="px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold"
-              >
-                ⬇️ Instalar Ollama automáticamente
-              </button>
-              <a
-                href={descargaOllama()}
-                target="_blank"
-                rel="noreferrer"
-                className="px-3 py-1.5 rounded border border-gray-300 text-gray-700 hover:bg-gray-100"
-              >
-                Instalador oficial
-              </a>
-              <button
-                type="button"
-                onClick={() => copiar('ollama pull llama3.2', 'descarga del modelo')}
-                className="px-3 py-1.5 rounded border border-gray-300 text-gray-700 hover:bg-gray-100"
-              >
-                Copiar: descargar un modelo
-              </button>
-              <button
-                type="button"
-                onClick={() => copiar(`setx OLLAMA_ORIGINS "${window.location.origin}"`, 'permiso para esta página')}
-                className="px-3 py-1.5 rounded border border-gray-300 text-gray-700 hover:bg-gray-100"
-              >
-                Copiar: permitir esta página
-              </button>
-            </div>
-            {copiado && <div className="text-green-700">Copiado: {copiado}. Pégalo en una terminal.</div>}
-
-            <div className="p-2 rounded bg-indigo-50 border border-indigo-200 text-indigo-900">
-              <div className="font-semibold">Con el botón azul: un archivo y un doble clic</div>
-              <div className="mt-1">
-                Se descarga <span className="font-mono">{/Windows/i.test(navigator.userAgent) ? 'instalar-ollama.bat' : 'instalar-ollama.sh'}</span>.
-                Al abrirlo, instala Ollama, lo autoriza para esta página y descarga el modelo
-                <span className="font-mono"> {modeloSugeridoOllama(capacidades)}</span>, elegido para tu equipo.
-                Windows pedirá permiso de administrador: acéptalo. Al terminar, vuelve aquí y pulsa «Volver a comprobar».
-              </div>
-            </div>
-
-            <details>
-              <summary className="cursor-pointer font-semibold text-gray-700">Prefiero hacerlo a mano</summary>
-              <ol className="list-decimal pl-4 space-y-1 mt-1">
-                <li>Instala Ollama con «Instalador oficial» y ábrelo (queda en la bandeja del sistema).</li>
-                <li>
-                  En una terminal, descarga un modelo:
-                  <code className="block mt-1 p-1 bg-gray-100 rounded text-gray-800">ollama pull {modeloSugeridoOllama(capacidades)}</code>
-                </li>
-                <li>
-                  Permite que esta página lo use y vuelve a abrir Ollama:
-                  <code className="block mt-1 p-1 bg-gray-100 rounded text-gray-800 break-all">setx OLLAMA_ORIGINS "{window.location.origin}"</code>
-                </li>
-                <li>Vuelve aquí y pulsa «Volver a comprobar».</li>
-              </ol>
-            </details>
-            <div className="text-gray-500">
-              El modelo queda guardado en tu equipo: no se descarga otra vez en cada navegador y usa tu tarjeta gráfica.
-            </div>
-          </div>
-        )}
       </div>
 
       {filaModelo('texto', '🧠 Modelo de lenguaje del navegador (si no usas Ollama)', CATALOGO_TEXTO, opcionTexto,

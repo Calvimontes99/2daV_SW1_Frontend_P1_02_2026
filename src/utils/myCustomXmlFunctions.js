@@ -20,6 +20,7 @@
  */
 
 import { parseAtributo, parseMetodo, SIMBOLO_POR_VISIBILIDAD } from './umlParser.js';
+import { paresClaseAsociacion } from './claseAsociacion.js';
 
 const escapar = (texto) =>
   String(texto ?? '')
@@ -209,6 +210,17 @@ const prepararModelo = (nodes, edges, nombreModelo) => {
       };
     });
 
+  // Clase de asociación: la clase y su asociación salen juntas como una uml:AssociationClass
+  // (r.clase en la relación, c.asociacion en la clase). Como en EA, solo sobre asociaciones.
+  const pares = paresClaseAsociacion(nodes, edges);
+  const clasePorNodo = new Map(clases.map((c) => [c.nodo.id, c]));
+  relaciones.forEach((r) => {
+    const clase = r.tipo === 'association' && clasePorNodo.get(pares.get(r.edge.id));
+    if (!clase || clase.esEnum || clase.estereotipo === 'interface' || clase.asociacion) return;
+    r.clase = clase;
+    clase.asociacion = r;
+  });
+
   return { titulo, clases, relaciones };
 };
 
@@ -357,10 +369,33 @@ function construirXmiEA({ titulo, clases, relaciones }) {
   w(1, '<uml:Model xmi:type="uml:Model" name="EA_Model" visibility="public">');
   w(2, `<packagedElement xmi:type="uml:Package" xmi:id="${paquete}" name="${t}" visibility="public">`);
 
+  // Extremos de una asociación: dentro de su uml:Association o de la uml:AssociationClass.
+  // Sus ids salen del id de la relación, como EA los deriva del GUID del conector.
+  const extremoUML = (idExtremo, idAsociacion, tipoId, mult, rol, agregacion) => {
+    w(4,
+      `<ownedEnd xmi:type="uml:Property" xmi:id="${idExtremo}"${rol ? ` name="${escapar(rol)}"` : ''} visibility="public"` +
+      ` association="${idAsociacion}" ${PROPIEDAD_EA} aggregation="${agregacion}">`
+    );
+    if (mult) {
+      w(5, `<lowerValue xmi:type="uml:LiteralInteger" xmi:id="${conPrefijo('LI000001', idXmi(`${idExtremo}::lower`))}" value="${mult.lower}"/>`);
+      w(5, `<upperValue xmi:type="uml:LiteralUnlimitedNatural" xmi:id="${conPrefijo('LI000002', idXmi(`${idExtremo}::upper`))}" value="${mult.upper}"/>`);
+    }
+    w(5, `<type xmi:idref="${tipoId}"/>`);
+    w(4, '</ownedEnd>');
+  };
+  const extremosUML = (r, idAsociacion) => {
+    const dst = conPrefijo('dst', r.id);
+    const src = conPrefijo('src', r.id);
+    w(4, `<memberEnd xmi:idref="${dst}"/>`);
+    w(4, `<memberEnd xmi:idref="${src}"/>`);
+    extremoUML(dst, idAsociacion, r.destino, r.multDestino, r.rolDestino, 'none');
+    extremoUML(src, idAsociacion, r.origen, r.multOrigen, r.rolOrigen, agregacionDe(r));
+  };
+
   // ---------- Clasificadores ----------
   clases.forEach((c) => {
     w(3,
-      `<packagedElement xmi:type="${tipoXmiDe(c)}" xmi:id="${c.id}" name="${escapar(c.nombre)}" visibility="public"` +
+      `<packagedElement xmi:type="${c.asociacion ? 'uml:AssociationClass' : tipoXmiDe(c)}" xmi:id="${c.id}" name="${escapar(c.nombre)}" visibility="public"` +
       `${c.estereotipo === 'abstract' ? ' isAbstract="true"' : ''}>`
     );
     c.literales.forEach((l) => {
@@ -391,33 +426,18 @@ function construirXmiEA({ titulo, clases, relaciones }) {
       .forEach((r) => {
         w(4, `<generalization xmi:type="uml:Generalization" xmi:id="${r.id}" general="${r.destino}"/>`);
       });
+    // Clase de asociación: la asociación es este mismo elemento
+    if (c.asociacion) extremosUML(c.asociacion, c.id);
     w(3, '</packagedElement>');
   });
 
   // ---------- Relaciones ----------
-  const extremoUML = (idExtremo, r, tipoId, mult, rol, agregacion) => {
-    w(4,
-      `<ownedEnd xmi:type="uml:Property" xmi:id="${idExtremo}"${rol ? ` name="${escapar(rol)}"` : ''} visibility="public"` +
-      ` association="${r.id}" ${PROPIEDAD_EA} aggregation="${agregacion}">`
-    );
-    if (mult) {
-      w(5, `<lowerValue xmi:type="uml:LiteralInteger" xmi:id="${conPrefijo('LI000001', idXmi(`${idExtremo}::lower`))}" value="${mult.lower}"/>`);
-      w(5, `<upperValue xmi:type="uml:LiteralUnlimitedNatural" xmi:id="${conPrefijo('LI000002', idXmi(`${idExtremo}::upper`))}" value="${mult.upper}"/>`);
-    }
-    w(5, `<type xmi:idref="${tipoId}"/>`);
-    w(4, '</ownedEnd>');
-  };
-
   relaciones.forEach((r) => {
     const nombre = r.nombre ? ` name="${escapar(r.nombre)}"` : '';
+    if (r.clase) return; // ya salió dentro de su uml:AssociationClass
     if (ES_ASOCIACION.has(r.tipo)) {
-      const dst = conPrefijo('dst', r.id);
-      const src = conPrefijo('src', r.id);
       w(3, `<packagedElement xmi:type="uml:Association" xmi:id="${r.id}"${nombre} visibility="public">`);
-      w(4, `<memberEnd xmi:idref="${dst}"/>`);
-      w(4, `<memberEnd xmi:idref="${src}"/>`);
-      extremoUML(dst, r, r.destino, r.multDestino, r.rolDestino, 'none');
-      extremoUML(src, r, r.origen, r.multOrigen, r.rolOrigen, agregacionDe(r));
+      extremosUML(r, r.id);
       w(3, '</packagedElement>');
     } else if (r.tipo === 'dependency' || r.tipo === 'realization') {
       const tipo = r.tipo === 'dependency' ? 'uml:Dependency' : 'uml:Realization';
@@ -450,10 +470,11 @@ function construirXmiEA({ titulo, clases, relaciones }) {
   let localCaracteristica = 1;
   clases.forEach((c) => {
     const sType = tipoXmiDe(c).replace('uml:', '');
-    w(3, `<element xmi:idref="${c.id}" xmi:type="${tipoXmiDe(c)}" name="${escapar(c.nombre)}" scope="public">`);
+    // En la base de EA una clase de asociación es una clase con NType 17
+    w(3, `<element xmi:idref="${c.id}" xmi:type="${c.asociacion ? 'uml:AssociationClass' : tipoXmiDe(c)}" name="${escapar(c.nombre)}" scope="public">`);
     w(4, `<model package="${paquete}" tpos="0" ea_localid="${localId.get(c.id)}" ea_eleType="element"/>`);
     w(4,
-      `<properties isSpecification="false" sType="${sType}" nType="0" scope="public" isRoot="false" isLeaf="false"` +
+      `<properties isSpecification="false" sType="${sType}" nType="${c.asociacion ? 17 : 0}" scope="public" isRoot="false" isLeaf="false"` +
       ` isAbstract="${c.estereotipo === 'abstract'}" isActive="false"/>`
     );
     w(4, `<project author="${AUTOR}" version="1.0" phase="1.0" created="${fecha}" modified="${fecha}" complexity="1" status="Proposed"/>`);
@@ -568,7 +589,11 @@ function construirXmiEA({ titulo, clases, relaciones }) {
     extremoConector('source', r.origen, r.multOrigen, r.rolOrigen, 'none', asociacion ? null : false);
     extremoConector('target', r.destino, r.multDestino, r.rolDestino, agregacionDe(r), asociacion ? null : true);
     w(3, `<model ea_localid="${k + 1}"/>`);
-    w(3, `<properties ea_type="${EA_TYPE[r.tipo]}" direction="${asociacion ? 'Unspecified' : 'Source -&gt; Destination'}"/>`);
+    // El conector de una clase de asociación lleva SubType "Class" en la base de EA
+    w(3,
+      `<properties ea_type="${EA_TYPE[r.tipo]}" direction="${asociacion ? 'Unspecified' : 'Source -&gt; Destination'}"` +
+      `${r.clase ? ' subtype="Class"' : ''}/>`
+    );
     w(3, '<modifiers isRoot="false" isLeaf="false"/>');
     w(3, '<parameterSubstitutions/>');
     w(3, '<documentation/>');
@@ -681,9 +706,31 @@ function construirXmi251({ titulo, clases, relaciones }) {
   w(1, '<xmi:Documentation exporter="Diagramador UML Colaborativo" exporterVersion="2.5"/>');
   w(1, `<uml:Model xmi:type="uml:Model" xmi:id="${idPaquete(titulo)}" name="${escapar(titulo)}">`);
 
+  /** Extremos de una asociación: dentro de su uml:Association o de la uml:AssociationClass. */
+  const extremos = (nivel, r, idAsociacion) => {
+    const src = conPrefijo('src', r.id);
+    const dst = conPrefijo('dst', r.id);
+    w(nivel, `<memberEnd xmi:idref="${src}"/>`);
+    w(nivel, `<memberEnd xmi:idref="${dst}"/>`);
+    [
+      [src, r.origen, r.multOrigen, r.rolOrigen, agregacionDe(r)],
+      [dst, r.destino, r.multDestino, r.rolDestino, 'none'],
+    ].forEach(([idExtremo, tipoId, mult, rol, agregacion]) => {
+      w(nivel,
+        `<ownedEnd xmi:type="uml:Property" xmi:id="${idExtremo}"${rol ? ` name="${escapar(rol)}"` : ''}` +
+        ` type="${tipoId}" association="${idAsociacion}"${agregacion !== 'none' ? ` aggregation="${agregacion}"` : ''}>`
+      );
+      if (mult) {
+        w(nivel + 1, `<lowerValue xmi:type="uml:LiteralInteger" value="${mult.lower}"/>`);
+        w(nivel + 1, `<upperValue xmi:type="uml:LiteralUnlimitedNatural" value="${mult.upper}"/>`);
+      }
+      w(nivel, '</ownedEnd>');
+    });
+  };
+
   clases.forEach((c) => {
     w(2,
-      `<packagedElement xmi:type="${tipoXmiDe(c)}" xmi:id="${c.id}" name="${escapar(c.nombre)}"` +
+      `<packagedElement xmi:type="${c.asociacion ? 'uml:AssociationClass' : tipoXmiDe(c)}" xmi:id="${c.id}" name="${escapar(c.nombre)}"` +
       `${c.estereotipo === 'abstract' ? ' isAbstract="true"' : ''}>`
     );
     c.literales.forEach((l) => {
@@ -717,31 +764,17 @@ function construirXmi251({ titulo, clases, relaciones }) {
       .forEach((r) => {
         w(3, `<generalization xmi:type="uml:Generalization" xmi:id="${r.id}" general="${r.destino}"/>`);
       });
+    // Clase de asociación: la asociación es este mismo elemento
+    if (c.asociacion) extremos(3, c.asociacion, c.id);
     w(2, '</packagedElement>');
   });
 
   relaciones.forEach((r) => {
     const nombre = r.nombre ? ` name="${escapar(r.nombre)}"` : '';
+    if (r.clase) return; // ya salió dentro de su uml:AssociationClass
     if (ES_ASOCIACION.has(r.tipo)) {
-      const src = conPrefijo('src', r.id);
-      const dst = conPrefijo('dst', r.id);
       w(2, `<packagedElement xmi:type="uml:Association" xmi:id="${r.id}"${nombre}>`);
-      w(3, `<memberEnd xmi:idref="${src}"/>`);
-      w(3, `<memberEnd xmi:idref="${dst}"/>`);
-      [
-        [src, r.origen, r.multOrigen, r.rolOrigen, agregacionDe(r)],
-        [dst, r.destino, r.multDestino, r.rolDestino, 'none'],
-      ].forEach(([idExtremo, tipoId, mult, rol, agregacion]) => {
-        w(3,
-          `<ownedEnd xmi:type="uml:Property" xmi:id="${idExtremo}"${rol ? ` name="${escapar(rol)}"` : ''}` +
-          ` type="${tipoId}" association="${r.id}"${agregacion !== 'none' ? ` aggregation="${agregacion}"` : ''}>`
-        );
-        if (mult) {
-          w(4, `<lowerValue xmi:type="uml:LiteralInteger" value="${mult.lower}"/>`);
-          w(4, `<upperValue xmi:type="uml:LiteralUnlimitedNatural" value="${mult.upper}"/>`);
-        }
-        w(3, '</ownedEnd>');
-      });
+      extremos(3, r, r.id);
       w(2, '</packagedElement>');
     } else if (r.tipo === 'dependency' || r.tipo === 'realization') {
       const tipo = r.tipo === 'dependency' ? 'uml:Dependency' : 'uml:Realization';

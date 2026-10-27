@@ -19,9 +19,15 @@ const LeftSidebar = ({
   updateNodeData,
   updateEdgeData,
   handleCreateAssociationClass,
+  iniciarClaseAsociacion,
+  eligiendoRelacionAC,
+  claseAsociacionSeleccion = {},
+  vincularClaseExistente,
+  quitarClaseAsociacion,
   setSelectedEdge,
   setEditingEdge,
 }) => {
+  const { relacionDeClase, relacionesParaVincular = [], claseDeRelacion } = claseAsociacionSeleccion;
   const [activeTab, setActiveTab] = useState('node');
   const [isCollapsed, setIsCollapsed] = useState(false);
 
@@ -198,6 +204,39 @@ const LeftSidebar = ({
         </p>
       </div>
 
+      {/* Clase de asociación: la clase unida con línea punteada a una asociación */}
+      {relacionDeClase ? (
+        <div className="mb-4 p-3 bg-indigo-50 border border-indigo-200 rounded-lg">
+          <p className="text-sm font-semibold text-indigo-900">🔗 Clase de asociación de</p>
+          <p className="text-sm text-indigo-800 break-words">{relacionDeClase.etiqueta}</p>
+          <button
+            onClick={() => quitarClaseAsociacion(relacionDeClase.id)}
+            className="btn-secondary w-full mt-2 text-sm"
+          >
+            Quitar de la relación
+          </button>
+        </div>
+      ) : relacionesParaVincular.length > 0 && (
+        <div className="mb-4">
+          <label className="block text-sm font-semibold mb-1 text-gray-700">
+            Usar como clase de asociación de
+          </label>
+          <select
+            value=""
+            onChange={(e) => e.target.value && vincularClaseExistente(selectedNode.id, e.target.value)}
+            className="input-modern"
+          >
+            <option value="">Ninguna relación</option>
+            {relacionesParaVincular.map((r) => (
+              <option key={r.id} value={r.id}>{r.etiqueta}</option>
+            ))}
+          </select>
+          <p className="text-xs text-gray-500 mt-1">
+            La clase queda unida con una línea punteada a la asociación elegida.
+          </p>
+        </div>
+      )}
+
       <button
         onClick={handleSaveNode}
         className="btn-primary w-full mt-2"
@@ -310,8 +349,20 @@ const LeftSidebar = ({
         </div>
       )}
 
-        {/* Botón para crear clase de asociación (solo para relaciones Association sin clase existente) */}
-        {editingEdge?.type === "Association" && !editingEdge?.hasAssociationClass && (
+        {/* Clase de asociación de la relación: la que tiene, o el botón para crearla */}
+        {claseDeRelacion ? (
+          <div className="mt-4 p-3 bg-indigo-50 border border-indigo-200 rounded-lg">
+            <p className="text-indigo-900 text-sm text-center font-medium">
+              🔗 Clase de asociación: {claseDeRelacion.nombre}
+            </p>
+            <button
+              onClick={() => quitarClaseAsociacion(selectedEdge.id)}
+              className="btn-secondary w-full mt-2 text-sm"
+            >
+              Quitar clase de asociación
+            </button>
+          </div>
+        ) : editingEdge?.type === "Association" && (
           <div className="mt-4">
             <button
               onClick={handleCreateAssociationClass}
@@ -320,19 +371,7 @@ const LeftSidebar = ({
               🔗 Crear Clase de Asociación
             </button>
             <p className="text-xs text-gray-500 mt-1 text-center">
-              Crea una clase asociada a esta relación
-            </p>
-          </div>
-        )}
-
-        {/* Mensaje si ya tiene clase de asociación */}
-        {editingEdge?.type === "Association" && editingEdge?.hasAssociationClass && (
-          <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
-            <p className="text-blue-800 text-sm text-center font-medium">
-              ✅ Esta relación ya tiene una clase de asociación
-            </p>
-            <p className="text-blue-600 text-xs mt-1 text-center">
-              ID: {editingEdge.associationClassId?.substring(0, 12)}...
+              Crea una clase unida con línea punteada a esta relación
             </p>
           </div>
         )}
@@ -400,9 +439,9 @@ const LeftSidebar = ({
         )}
       </button>
 
-      {/* Contenido visible si NO está colapsado */}
+      {/* Contenido visible si NO está colapsado (con scroll propio: el editor puede ser más alto que la pantalla) */}
       {!isCollapsed && (
-        <div className="p-4 space-y-6">
+        <div className="p-4 space-y-6 flex-1 min-h-0 overflow-y-auto">
           {/* Botones de creación */}
           <div className="space-y-2">
             {/* Botón "Nueva Clase" */}
@@ -423,6 +462,23 @@ const LeftSidebar = ({
               <span className="w-5 h-5 flex items-center justify-center">📝</span>
               Nueva Nota
             </button>
+
+            {/* Botón "Clase de asociación": se elige la relación con un clic en su línea */}
+            <button
+              onClick={iniciarClaseAsociacion}
+              data-tour="clase-asociacion"
+              aria-pressed={!!eligiendoRelacionAC}
+              title="Clase unida con una línea punteada a una asociación entre dos clases (clase intermedia)"
+              className={`btn-secondary flex items-center gap-2 w-full ${eligiendoRelacionAC ? 'bg-indigo-100 text-indigo-900 border-indigo-300' : ''}`}
+            >
+              <span className="w-5 h-5 flex items-center justify-center">🔗</span>
+              {eligiendoRelacionAC ? 'Elige la relación…' : 'Clase de asociación'}
+            </button>
+            {eligiendoRelacionAC && (
+              <p className="text-xs text-indigo-800">
+                Haz clic en la línea de la asociación entre las dos clases. Esc para cancelar.
+              </p>
+            )}
           </div>
 
           {/* Si hay un nodo o arista seleccionado, mostramos el editor */}

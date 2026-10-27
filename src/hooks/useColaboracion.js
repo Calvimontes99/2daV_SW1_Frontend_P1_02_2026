@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { cursorParaReanudar, fusionarPorId } from '../utils/fusionHistorial.js';
 import { anterioresPorCanal, canalDe } from '../utils/canalesChat.js';
+import {
+  comoMensaje, guardarCopiaChat, guardarPendientes, leerCopiaChat, leerPendientes, nuevoIdLocal, paraSubir, quitarAceptados,
+} from '../utils/chatSinConexion.js';
+
+const SUBIR_POR_VEZ = 100;
 
 /**
  * Chats de la sala (el del equipo y el de la IA compartida): mensajes de todos, propuestas de cambios de la IA,
@@ -8,8 +13,13 @@ import { anterioresPorCanal, canalDe } from '../utils/canalesChat.js';
  * que pasó desde la última visita. Todo llega por el mismo socket del tablero.
  * Los mensajes de los dos chats van en una sola lista (cada uno con su `canal`); lo que se pagina
  * y lo que se cuenta como "sin leer" va por canal.
+ *
+ * Sin conexión: se lee la copia guardada del chat y lo que se escribe (y lo que responde la IA
+ * local) queda pendiente; al volver la conexión se comparte con la sala (ver chatSinConexion.js).
+ *
+ * @param {{id, nombre}|null} usuario  quien usa el tablero (sus pendientes se guardan aparte)
  */
-export const useColaboracion = (socket, salaId) => {
+export const useColaboracion = (socket, salaId, usuario = null) => {
   const [mensajes, setMensajes] = useState([]);
   const [propuestas, setPropuestas] = useState([]);
   const [estadoIA, setEstadoIA] = useState({ ocupada: false, atendiendoA: null, enCola: 0 });
@@ -18,6 +28,9 @@ export const useColaboracion = (socket, salaId) => {
   const [cargado, setCargado] = useState(false);
   const [sinLeer, setSinLeer] = useState({ equipo: 0, ia: 0 });
   const [hayAnteriores, setHayAnteriores] = useState({ equipo: false, ia: false });
+  const [pendientes, setPendientes] = useState([]);
+  const usuarioId = usuario?.id ?? null;
+  const usuarioNombre = usuario?.nombre || null;
 
   const ponerMensaje = useCallback((m) => {
     setMensajes((prev) => {
@@ -43,25 +56,81 @@ export const useColaboracion = (socket, salaId) => {
   // Hora del servidor de la última respuesta: al reconectar se piden también los mensajes que
   // cambiaron desde entonces (no solo los nuevos)
   const marcaRef = useRef(null);
+  const pendientesRef = useRef(pendientes);
+  const subirRef = useRef(null);
+
+  /** Cambia los pendientes y los guarda en el navegador. */
+  const cambiarPendientes = useCallback((cambio) => {
+    const nuevos = cambio(pendientesRef.current);
+    pendientesRef.current = nuevos;
+    guardarPendientes(salaId, usuarioId, nuevos);
+    setPendientes(nuevos);
+  }, [salaId, usuarioId]);
+
+  // Otro tablero (también sin conexión): se empieza con la copia guardada de ESE tablero
+  useEffect(() => {
+    if (!salaId || salaCargadaRef.current === salaId) return;
+    salaCargadaRef.current = salaId;
+    const copia = leerCopiaChat(salaId);
+    mensajesRef.current = copia?.mensajes || [];
+    cambiosRef.current = copia?.cambios || [];
+    marcaRef.current = null;
+    setMensajes(mensajesRef.current);
+    setPropuestas(copia?.propuestas || []);
+    setCambios(cambiosRef.current);
+    setBienvenida(null);
+    setHayAnteriores({
+      equipo: !!(copia?.hayAnteriores?.equipo || copia?.recortado),
+      ia: !!(copia?.hayAnteriores?.ia || copia?.recortado),
+    });
+    setSinLeer({ equipo: 0, ia: 0 });
+  }, [salaId]);
+
+  // Lo pendiente es de cada usuario en cada tablero
+  useEffect(() => {
+    if (!salaId) return;
+    pendientesRef.current = leerPendientes(salaId, usuarioId);
+    setPendientes(pendientesRef.current);
+  }, [salaId, usuarioId]);
+
+  // Copia del chat para leerlo sin conexión (también después de recargar)
+  useEffect(() => {
+    if (!salaId) return undefined;
+    const reloj = setTimeout(() => guardarCopiaChat(salaId, { mensajes, propuestas, cambios, hayAnteriores }), 800);
+    return () => clearTimeout(reloj);
+  }, [salaId, mensajes, propuestas, cambios, hayAnteriores]);
 
   useEffect(() => {
     if (!socket || !salaId) return undefined;
-    // Otro tablero: se empieza de cero (lo anterior no se fusiona con lo de esta sala)
-    if (salaCargadaRef.current !== salaId) {
-      salaCargadaRef.current = salaId;
-      mensajesRef.current = [];
-      cambiosRef.current = [];
-      marcaRef.current = null;
-      setMensajes([]); setPropuestas([]); setCambios([]); setBienvenida(null);
-      setHayAnteriores({ equipo: false, ia: false }); setSinLeer({ equipo: 0, ia: 0 });
-    }
     // Respuestas de una conexión o sala anterior se ignoran
     let vigente = true;
+    let subiendo = false;
     // Lo que llega en vivo mientras se esperan las respuestas no lo pisa una respuesta tardía
     const vivos = { mensajes: new Set(), propuestas: new Set(), cambios: new Set() };
+
+    /** Comparte con la sala lo escrito sin conexión, de a tandas, hasta que no quede nada. */
+    const subir = () => {
+      const lote = pendientesRef.current.slice(0, SUBIR_POR_VEZ);
+      if (!vigente || subiendo || !lote.length) return;
+      subiendo = true;
+      socket.emit('chat:importar', { salaId, mensajes: lote.map(paraSubir) }, (r) => {
+        subiendo = false;
+        if (!vigente) return;
+        // Lo que el servidor guardó (o ya tenía) deja de estar pendiente; el resto se reintenta
+        if (r?.aceptados?.length) cambiarPendientes((prev) => quitarAceptados(prev, r.aceptados));
+        if (r?.ok && pendientesRef.current.length && r.aceptados?.length) subir();
+      });
+    };
+    subirRef.current = subir;
+
     const alNuevo = (m) => {
       vivos.mensajes.add(m.id);
       ponerMensaje(m);
+      // Uno propio escrito sin conexión que ya llegó a la sala: deja de mostrarse como pendiente
+      if (m.idLocal && pendientesRef.current.some((e) => e.idLocal === m.idLocal)) {
+        cambiarPendientes((prev) => quitarAceptados(prev, [m.idLocal]));
+        return;
+      }
       const canal = canalDe(m);
       setSinLeer((n) => ({ ...n, [canal]: n[canal] + 1 }));
     };
@@ -90,6 +159,8 @@ export const useColaboracion = (socket, salaId) => {
         setPropuestas((prev) => fusionarPorId(prev, r.propuestas || [], vivos.propuestas));
         if (r.ia) setEstadoIA(r.ia);
         setCargado(true);
+        // Ya conectado y al día: lo que se hizo sin conexión se comparte con el equipo
+        subir();
       });
     };
     const pedirCambios = (despuesDe) => {
@@ -104,6 +175,7 @@ export const useColaboracion = (socket, salaId) => {
 
     return () => {
       vigente = false;
+      if (subirRef.current === subir) subirRef.current = null;
       socket.off('chat:nuevo', alNuevo);
       socket.off('chat:actualizado', alActualizado);
       socket.off('propuesta:nueva', alPropuesta);
@@ -112,7 +184,19 @@ export const useColaboracion = (socket, salaId) => {
       socket.off('historial:nuevo', alHistorial);
       socket.off('chat:bienvenida', setBienvenida);
     };
-  }, [socket, salaId, ponerMensaje, ponerPropuesta]);
+  }, [socket, salaId, ponerMensaje, ponerPropuesta, cambiarPendientes]);
+
+  /**
+   * Algo escrito sin conexión (o lo que respondió la IA local): queda pendiente y se comparte al
+   * volver. Si justo volvió la conexión, se comparte enseguida.
+   * @param {{canal: 'equipo'|'ia', tipo: 'usuario'|'ia', texto: string, datos?: object}} entrada
+   */
+  const agregarSinConexion = useCallback((entrada) => {
+    const e = { idLocal: nuevoIdLocal(), escritoEn: new Date().toISOString(), datos: {}, ...entrada };
+    cambiarPendientes((prev) => [...prev, e]);
+    setTimeout(() => subirRef.current?.(), 0);
+    return e;
+  }, [cambiarPendientes]);
 
   /** @param {{ajusta?: number}} extras  ajusta: id de la propuesta que se pide ajustar */
   const enviar = useCallback((texto, paraIA = false, extras = {}) => new Promise((resolve) => {
@@ -154,7 +238,7 @@ export const useColaboracion = (socket, salaId) => {
   }), [socket, salaId, mensajes]);
 
   const decidir = useCallback((propuestaId, decision) => new Promise((resolve) => {
-    if (!socket) { resolve({ ok: false, mensaje: 'Sin conexión con el servidor.' }); return; }
+    if (!socket) { resolve({ ok: false, mensaje: 'Sin conexión con el servidor: decide la propuesta cuando vuelva.' }); return; }
     socket.emit('propuesta:decidir', { salaId, propuestaId, decision }, (r) => resolve(r || { ok: false }));
   }), [socket, salaId]);
 
@@ -170,9 +254,16 @@ export const useColaboracion = (socket, salaId) => {
     [mensajes],
   );
 
+  // Lo del servidor y, al final, lo escrito sin conexión que todavía no se compartió
+  const mensajesVisibles = useMemo(
+    () => (pendientes.length ? [...mensajes, ...pendientes.map((e) => comoMensaje(e, { id: usuarioId, nombre: usuarioNombre }))] : mensajes),
+    [mensajes, pendientes, usuarioId, usuarioNombre],
+  );
+
   return {
-    mensajes, propuestas, propuestaPendiente, ultimaRevision, estadoIA, cambios, bienvenida, cargado, sinLeer,
+    mensajes: mensajesVisibles, propuestas, propuestaPendiente, ultimaRevision, estadoIA, cambios, bienvenida, cargado, sinLeer,
     hayAnteriores, enviar, enviarAdjunto, cargarAnteriores, decidir, cerrarBienvenida: () => setBienvenida(null),
+    agregarSinConexion, pendientes: pendientes.length,
     // Sin canal: los dos chats
     marcarLeidos: (canal) => setSinLeer((n) => (canal ? { ...n, [canal]: 0 } : { equipo: 0, ia: 0 })),
   };

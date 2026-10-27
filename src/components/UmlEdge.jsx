@@ -1,4 +1,4 @@
-import React, { memo, useState } from 'react';
+import React, { memo } from 'react';
 import {
   BaseEdge,
   EdgeLabelRenderer,
@@ -157,6 +157,23 @@ const puntoEnLado = (r, lado, desplazamiento) => {
 
 const esLadoHorizontal = (lado) => lado === Position.Left || lado === Position.Right;
 
+/**
+ * Línea punteada de una clase de asociación: del punto medio de la relación al lado de
+ * la clase que mira hacia ese punto (como la dibuja Enterprise Architect).
+ */
+const trazoClaseAsociacion = (desde, clase) => {
+  const r = rectanguloDe(clase);
+  const dx = desde.x - r.cx;
+  const dy = desde.y - r.cy;
+  let hasta;
+  if (Math.abs(dy) * r.ancho >= Math.abs(dx) * r.alto) {
+    hasta = { x: Math.max(r.x + 12, Math.min(r.x + r.ancho - 12, desde.x)), y: dy > 0 ? r.y + r.alto : r.y };
+  } else {
+    hasta = { x: dx > 0 ? r.x + r.ancho : r.x, y: Math.max(r.y + 12, Math.min(r.y + r.alto - 12, desde.y)) };
+  }
+  return `M ${desde.x} ${desde.y} L ${hasta.x} ${hasta.y}`;
+};
+
 const UmlEdge = ({
   id,
   source,
@@ -179,29 +196,10 @@ const UmlEdge = ({
   const nodoOrigen = useInternalNode(source);
   const nodoDestino = useInternalNode(target);
   const paralelas = useStore((s) => posicionEntreParalelas(s.edges, id, source, target));
-
-  // Estado para forzar re-render de líneas punteadas
-  const [forceRender, setForceRender] = useState(0);
-
-  // Sistema de callback para forzar re-render cuando el edge padre cambia
-  React.useEffect(() => {
-    if (data?.isAssociationConnection && data?.parentRelationId) {
-      const forceUpdate = (parentEdgeId) => {
-        if (parentEdgeId === data.parentRelationId) {
-          setForceRender(prev => prev + 1);
-
-        }
-      };
-
-      window.__forceAssocLineUpdate = forceUpdate;
-
-      return () => {
-        if (window.__forceAssocLineUpdate === forceUpdate) {
-          window.__forceAssocLineUpdate = null;
-        }
-      };
-    }
-  }, [data?.isAssociationConnection, data?.parentRelationId, id]);
+  // Clase de asociación de esta relación: la línea punteada la dibuja la relación
+  const nodoClaseAsociacion = useInternalNode(
+    data?.hasAssociationClass ? data.associationClassNodeId || data.associationClassId : undefined
+  );
 
   // Detectar si es una conexión recursiva (mismo nodo).
   // Preferir comparar los ids de nodo (source === target). Como fallback,
@@ -229,7 +227,10 @@ const UmlEdge = ({
   let desplazamiento = 0;
   let enCarril = false;
 
-  const esNormal = !isRecursive && !isAssociationConnection && !isNoteConnection && !data?.hasAssociationClass;
+  // La línea punteada de una clase de asociación no se dibuja sola: la traza su relación
+  if (isAssociationConnection) return null;
+
+  const esNormal = !isRecursive && !isNoteConnection;
   if (esNormal) {
     const [indice, total] = paralelas.split('/').map(Number);
     enCarril = total > 1;
@@ -255,29 +256,7 @@ const UmlEdge = ({
 
   let edgePath, labelX, labelY;
 
-  // 🎯 MODIFICACIÓN PARA ASSOCIATION CLASS: Forzar path a través del punto AC
-  if (data?.hasAssociationClass && !isAssociationConnection && !isNoteConnection) {
-    // Para edges con clase de asociación, usar Bézier que pase por el punto AC
-    const midX = (sourceX + targetX) / 2;
-    const midY = (sourceY + targetY) / 2;
-
-    // Crear Bézier path que pase por el punto medio (donde está el AC)
-    [edgePath, labelX, labelY] = getBezierPath({
-      sourceX,
-      sourceY,
-      sourcePosition,
-      targetX,
-      targetY,
-      targetPosition,
-      curvature: 0.1 // Curvatura menor para que pase más cerca del AC
-    });
-
-    // Forzar que el label esté en el punto medio calculado
-    labelX = midX;
-    labelY = midY - 10; // Slightly above for better visibility
-
-
-  } else if (hasCustomPath && !isRecursive) {
+  if (hasCustomPath && !isRecursive) {
     // Usar Bézier path con puntos de control personalizados
     [edgePath, labelX, labelY] = getBezierPath({
       sourceX: sx,
@@ -311,49 +290,6 @@ const UmlEdge = ({
 
   if (!edgePath) return null;
 
-  // 🔍 DEBUG TEMPORAL: Log de coordenadas del edge para debug de asociación
-  if (data?.hasAssociationClass || data?.isAssociationConnection) {
-
-
-    // 🎯 COMUNICAR COORDENADAS REALES AL BOARDPAGE Y A LÍNEAS PUNTEADAS
-    if (data?.hasAssociationClass && window.__onAssocEdgeRender) {
-      window.__onAssocEdgeRender({
-        edgeId: id,
-        realLabelX: labelX,
-        realLabelY: labelY,
-        sourceX,
-        sourceY,
-        targetX,
-        targetY
-      });
-    }
-
-    // 🔄 SISTEMA DE COORDENADAS COMPARTIDAS para líneas punteadas
-    if (data?.hasAssociationClass) {
-      if (!window.__acCoordinates) window.__acCoordinates = {};
-
-      // Detectar si las coordenadas han cambiado
-      const prevCoords = window.__acCoordinates[id];
-      const coordsChanged = !prevCoords ||
-        Math.abs(prevCoords.acX - labelX) > 0.1 ||
-        Math.abs(prevCoords.acY - labelY) > 0.1;
-
-      window.__acCoordinates[id] = {
-        acX: labelX,
-        acY: labelY,
-        timestamp: Date.now(),
-        version: (prevCoords?.version || 0) + (coordsChanged ? 1 : 0)
-      };
-
-      // Forzar invalidación de líneas punteadas cuando las coordenadas cambian
-      if (coordsChanged && window.__forceAssocLineUpdate) {
-        window.__forceAssocLineUpdate(id);
-      }
-
-
-    }
-  }
-
   // Resolve relationship type case-insensitively and default to Association
   const requestedRel = data.type || data.relation || 'Association';
   let edgeType = UML_RELATIONSHIP_TYPES['Association'];
@@ -364,95 +300,6 @@ const UmlEdge = ({
     edgeType = UML_RELATIONSHIP_TYPES['Association'];
   }
   const isSelected = data?.selected || false;
-
-  // Estilos especiales para conexiones de clase de asociación
-  if (isAssociationConnection) {
-
-
-    // Si tiene coordenadas AC target específicas, renderizar hacia esas coordenadas
-    let finalPath = edgePath;
-    let finalLabelX = labelX;
-    let finalLabelY = labelY;
-
-    // 🎯 COORDENADAS DINÁMICAS PRECISAS desde el edge original
-    if (data?.parentRelationId) {
-      // Obtener coordenadas exactas del edge original desde el sistema compartido
-      // El forceRender garantiza que siempre leemos las coordenadas más actuales
-      const originalCoords = window.__acCoordinates?.[data.parentRelationId];
-
-      if (originalCoords && originalCoords.acX !== undefined && originalCoords.acY !== undefined) {
-        // Usar las coordenadas EXACTAS del edge original (máxima precisión)
-        [finalPath, finalLabelX, finalLabelY] = getSmoothStepPath({
-          sourceX,
-          sourceY,
-          sourcePosition,
-          targetX: originalCoords.acX,
-          targetY: originalCoords.acY,
-          targetPosition: Position.Top,
-          borderRadius: 5,
-          offset: 10
-        });
-
-
-      } else {
-        // Fallback: coordenadas estáticas
-        if (data?.acTargetX && data?.acTargetY) {
-          [finalPath, finalLabelX, finalLabelY] = getSmoothStepPath({
-            sourceX,
-            sourceY,
-            sourcePosition,
-            targetX: data.acTargetX,
-            targetY: data.acTargetY,
-            targetPosition: Position.Top,
-            borderRadius: 5,
-            offset: 10
-          });
-
-
-        }
-      }
-    }
-
-    const associationStyle = {
-      ...style,
-      stroke: '#dc2626',
-      strokeWidth: 2,
-      strokeDasharray: '8,4',
-      pointerEvents: 'none',
-      opacity: 1,
-      zIndex: 1000
-    };
-
-    return (
-      <>
-        <BaseEdge
-          id={id}
-          path={finalPath}
-          style={associationStyle}
-          markerEnd="none"
-          markerStart="none"
-        />
-        <EdgeLabelRenderer>
-          <div
-            style={{
-              position: 'absolute',
-              background: '#dc2626',
-              color: 'white',
-              padding: '2px 6px',
-              borderRadius: '4px',
-              fontSize: '10px',
-              fontWeight: 'bold',
-              transform: `translate(-50%, -50%) translate(${finalLabelX}px,${finalLabelY}px)`,
-              pointerEvents: 'none',
-              zIndex: 1001
-            }}
-          >
-            AC-LINK
-          </div>
-        </EdgeLabelRenderer>
-      </>
-    );
-  }
 
   // Estilos especiales para conexiones de notas
   if (isNoteConnection) {
@@ -572,30 +419,16 @@ const UmlEdge = ({
         markerStart={edgeType.markerStart ? `url(#${edgeType.markerStart})` : undefined}
       />
 
-      {/* Indicador de clase de asociación */}
-      {data?.hasAssociationClass && (
-        <>
-          <circle
-            cx={labelX}
-            cy={labelY}
-            r="4"
-            fill="#3b82f6"
-            stroke="white"
-            strokeWidth="2"
-            style={{ filter: 'drop-shadow(0 1px 2px rgb(0 0 0 / 0.3))' }}
-          />
-          <text
-            x={labelX}
-            y={labelY - 12}
-            textAnchor="middle"
-            fontSize="10"
-            fontWeight="bold"
-            fill="#3b82f6"
-            style={{ filter: 'drop-shadow(0 1px 1px rgb(255 255 255 / 0.8))' }}
-          >
-            AC
-          </text>
-        </>
+      {/* Clase de asociación: línea punteada del punto medio de la relación a la clase */}
+      {nodoClaseAsociacion?.measured?.width && (
+        <path
+          d={trazoClaseAsociacion({ x: labelX, y: labelY }, nodoClaseAsociacion)}
+          fill="none"
+          stroke="#334155"
+          strokeWidth={2}
+          strokeDasharray="6,4"
+          style={{ pointerEvents: 'none' }}
+        />
       )}
 
       <EdgeLabelRenderer>
@@ -616,26 +449,6 @@ const UmlEdge = ({
             className="nodrag nopan"
           >
             {data.label}
-          </div>
-        )}
-
-        {/* Indicador visual para clase de asociación */}
-        {data?.hasAssociationClass && (
-          <div
-            style={{
-              position: 'absolute',
-              background: '#3b82f6',
-              color: 'white',
-              padding: '1px 4px',
-              borderRadius: '6px',
-              fontSize: '10px',
-              fontWeight: 'bold',
-              transform: `translate(-50%, -50%) translate(${labelX}px,${labelY + 15}px)`
-            }}
-            className="nodrag nopan"
-            title="Esta relación tiene una clase de asociación"
-          >
-            AC
           </div>
         )}
 
