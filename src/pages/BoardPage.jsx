@@ -32,6 +32,7 @@ import BurbujaHerramientasDiagrama from '../components/BurbujaHerramientasDiagra
 import ChatSala from '../components/ChatSala';
 import useColaboracion from '../hooks/useColaboracion';
 import useIALocal from '../hooks/useIALocal';
+import { compararConDiagrama, leerArchivosJava, modeloDesdeJava } from '../utils/importarCodigo.js';
 import { esFantasma, superponerPropuesta } from '../utils/vistaPropuesta';
 import { deshacerSelectivo } from '../utils/deshacerSelectivo';
 import { borrarUsuarioLocal, guardarUsuarioLocal, leerUsuarioLocal } from '../offline/almacenTableros.js';
@@ -147,6 +148,7 @@ const BoardPage = () => {
     setNodes,
       setEdges,
     aplicarCambiosIA,
+    aplicarDiagrama,
     conectado,
     socketUnido,
     errorAcceso,
@@ -163,6 +165,8 @@ const BoardPage = () => {
   // Sin conexión, la IA del chat es la IA local de este equipo (sus cambios quedan como de la IA)
   const iaLocal = useIALocal({ nodes, edges, aplicar: aplicarCambiosIA });
   const [chatAbierto, setChatAbierto] = useState(true);
+  // Pedido al chat desde fuera (p. ej. "Verificar Diagrama" sin conexión)
+  const [pedidoChat, setPedidoChat] = useState(null);
   const [revisionOcultaId, setRevisionOcultaId] = useState(null);
   const [medidasFantasma, setMedidasFantasma] = useState({});
   const { fitView } = useReactFlow();
@@ -422,6 +426,17 @@ const BoardPage = () => {
       setChatAbierto(true);
       const r = await colaboracion.enviar('Revisa el diagrama completo y dime qué corregir', true);
       if (!r?.ok) Swal.fire({ icon: 'error', title: 'No se pudo pedir la revisión', text: r?.mensaje || 'Revisa tu conexión.' });
+      return;
+    }
+    // Sin conexión: la revisa la IA local en el mismo chat (reglas + Ollama si está) y marca las clases.
+    // Antes llamaba al servidor y fallaba.
+    if (currentUser) {
+      if (!nodes.length) {
+        Swal.fire({ icon: 'info', title: 'Diagrama vacío', text: 'No hay clases en el diagrama para verificar.' });
+        return;
+      }
+      setChatAbierto(true);
+      setPedidoChat({ texto: 'Revisa el diagrama completo y dime qué corregir', n: Date.now() });
       return;
     }
     try {
@@ -955,6 +970,75 @@ const BoardPage = () => {
       console.error('handleExportEAP error:', error);
       Swal.close();
       Swal.fire({ icon: 'error', title: 'Error', text: 'No se pudo generar el archivo .EAP.' });
+    }
+  };
+
+  /**
+   * Código -> diagrama: un .zip de un proyecto Spring Boot (o archivos .java). Se leen sus
+   * entidades en el navegador y se comparan con el diagrama: con conexión, las diferencias quedan
+   * como propuesta en el chat de la IA (el equipo decide); sin conexión, se aplican y se avisa al volver.
+   */
+  const handleImportarCodigo = async (e) => {
+    const input = e.target;
+    const archivos = Array.from(input.files || []);
+    input.value = '';
+    if (!archivos.length) return;
+    const escapar = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    try {
+      Swal.fire({ title: 'Leyendo el código...', allowOutsideClick: false, showConfirmButton: false, didOpen: () => Swal.showLoading() });
+      const modelo = modeloDesdeJava(await leerArchivosJava(archivos));
+      Swal.close();
+      const origen = archivos.length === 1 ? archivos[0].name : `${archivos.length} archivos`;
+      if (!modelo.clases.length) {
+        Swal.fire({ icon: 'info', title: 'No hay entidades', text: 'No encontré clases @Entity. Elige el .zip del proyecto Spring Boot o sus archivos .java.' });
+        return;
+      }
+      const actual = { nodes, edges };
+      const sinQuitar = compararConDiagrama(actual, modelo);
+      const conQuitar = compararConDiagrama(actual, modelo, { quitarAusentes: true });
+      const extra = conQuitar.cantidad - sinQuitar.cantidad;
+      if (!sinQuitar.cantidad && !extra) {
+        Swal.fire({ icon: 'success', title: 'El diagrama ya coincide con el código', text: `${modelo.clases.length} entidades leídas de ${origen}.` });
+        return;
+      }
+      const lista = (r) => r.resumen.map((x) => `<li>${escapar(x)}</li>`).join('');
+      const { isConfirmed, value: quitar } = await Swal.fire({
+        title: '📥 Código → diagrama',
+        html: `<div style="text-align:left;font-size:14px">
+          <p>${modelo.clases.length} entidades y ${modelo.relaciones.length} relaciones leídas de <b>${escapar(origen)}</b>.</p>
+          ${sinQuitar.cantidad ? `<p style="margin-top:8px"><b>Diferencias con el diagrama:</b></p><ul style="max-height:200px;overflow:auto;padding-left:18px;list-style:disc">${lista(sinQuitar)}</ul>` : '<p style="margin-top:8px">Solo hay elementos del diagrama que ya no están en el código.</p>'}
+          ${modelo.avisos.length ? `<p style="margin-top:8px;font-size:12px;color:#92400e">${modelo.avisos.slice(0, 3).map(escapar).join('<br>')}</p>` : ''}
+          <p style="margin-top:8px;font-size:12px;color:#555">${socketUnido ? 'Quedará como propuesta en el chat de la IA, con vista previa en la pizarra: el equipo la acepta o la rechaza.' : 'Sin conexión: se aplica ahora y el equipo se entera al volver la conexión.'}</p>
+        </div>`,
+        ...(extra > 0 ? { input: 'checkbox', inputValue: 0, inputPlaceholder: `Quitar también ${extra} elemento${extra === 1 ? '' : 's'} que ya no está${extra === 1 ? '' : 'n'} en el código` } : {}),
+        showCancelButton: true,
+        confirmButtonText: socketUnido ? 'Proponer al equipo' : 'Aplicar',
+        cancelButtonText: 'Cancelar',
+      });
+      if (!isConfirmed) return;
+      const r = quitar ? conQuitar : sinQuitar;
+      if (socketUnido) {
+        const resp = await colaboracion.proponerDesdeCodigo(
+          { nodos: r.nodos, aristas: r.aristas, quitarNodos: r.quitarNodos, quitarAristas: r.quitarAristas },
+          { archivo: origen, entidades: modelo.clases.length },
+        );
+        if (!resp?.ok) {
+          Swal.fire({ icon: 'error', title: 'No se pudo proponer', text: resp?.mensaje || 'Revisa tu conexión.' });
+          return;
+        }
+        setChatAbierto(true);
+        setPedidoChat({ pestana: 'ia', n: Date.now() });
+        return;
+      }
+      aplicarDiagrama(r.estado.nodes, r.estado.edges);
+      colaboracion.agregarSinConexion?.({
+        canal: 'equipo', tipo: 'usuario',
+        texto: `📥 Importé el código (${origen}) sin conexión y apliqué ${r.cantidad} cambio${r.cantidad === 1 ? '' : 's'}: ${r.resumen.join('; ')}.`,
+        datos: {},
+      });
+    } catch (error) {
+      console.error('Importar código', error);
+      Swal.fire({ icon: 'error', title: 'No se pudo leer el código', text: mensajeDeError(error, 'Elige el .zip del proyecto Spring Boot o sus archivos .java.') });
     }
   };
 
@@ -1711,6 +1795,16 @@ const BoardPage = () => {
             EAP
           </button>
 
+          {/* Código -> diagrama (la otra mitad de la sincronización) */}
+          <label
+            className="btn-secondary bg-gradient-to-r from-amber-500 to-orange-600 text-white px-3 py-2 rounded-md flex items-center gap-2 cursor-pointer"
+            title="Actualizar el diagrama desde el código: elige el .zip del proyecto Spring Boot o sus archivos .java"
+            data-tour="desde-codigo"
+          >
+            📥 Desde código
+            <input type="file" accept=".zip,.java" multiple onChange={handleImportarCodigo} className="hidden" />
+          </label>
+
           {/* Usuarios activos (la IA es un integrante más) */}
           <ActiveUsers users={activeUsers} />
           <div
@@ -1802,6 +1896,7 @@ const BoardPage = () => {
           setAbierto={setChatAbierto}
           enLinea={!!socketUnido}
           iaLocal={iaLocal}
+          pedidoExterno={pedidoChat}
         />
       )}
 

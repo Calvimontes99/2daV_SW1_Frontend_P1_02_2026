@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import Swal from 'sweetalert2';
 import { canalDe, mencionaALaIA } from '../utils/canalesChat.js';
-import { SUGERENCIAS_SIN_CONEXION } from '../utils/respuestaIALocal.js';
+import { SUGERENCIAS_SIN_CONEXION, pideRevision } from '../utils/respuestaIALocal.js';
 import PanelIALocal from './PanelIALocal';
 
 /**
@@ -98,7 +98,7 @@ const Mensaje = ({ m, propio, usuarioId, propuesta, onDecidir, onAjustar, onEnfo
     <div className={`flex ${propio ? 'justify-end' : 'justify-start'}`}>
       <div className={`max-w-[88%] rounded-xl px-3 py-2 text-sm shadow-sm ${esIA ? 'bg-violet-50 border border-violet-200' : propio ? 'bg-blue-600 text-white' : 'bg-white border border-gray-200'}`}>
         <div className={`flex items-center gap-2 text-[11px] mb-0.5 ${propio ? 'text-blue-100' : 'text-gray-500'}`}>
-          <span className="font-semibold">{deIALocal ? `💻 IA local${ajeno ? ` de ${d.pedidoPor}` : ''}` : esIA ? '🤖 IA' : propio ? 'Tú' : m.autorNombre}</span>
+          <span className="font-semibold">{d.origen === 'codigo' ? '📥 Desde el código' : deIALocal ? `💻 IA local${ajeno ? ` de ${d.pedidoPor}` : ''}` : esIA ? '🤖 IA' : propio ? 'Tú' : m.autorNombre}</span>
           <span>{hora(d.escritoEn || m.creadoEn)}</span>
           {esIA && d.proveedor && !deIALocal && <span className="px-1 rounded bg-violet-100 text-violet-700">{d.proveedor}</span>}
           {d.pendiente && <span className={`px-1 rounded ${propio ? 'bg-blue-500' : 'bg-amber-100 text-amber-800'}`} title="Se compartirá con el equipo al volver la conexión">⏳ al volver</span>}
@@ -148,6 +148,12 @@ const SUGERENCIAS = [
   ['Ideas', 'Dame ideas para mejorar este diseño'],
 ];
 
+// Las sugerencias de pedidos ocupan espacio y se pueden esconder; la elección queda guardada en este navegador
+const SUGERENCIAS_OCULTAS = 'chat.sugerenciasOcultas';
+const sugerenciasOcultas = () => {
+  try { return localStorage.getItem(SUGERENCIAS_OCULTAS) === '1'; } catch { return false; }
+};
+
 const Historial = ({ cambios }) => {
   const [autor, setAutor] = useState('');
   const autores = useMemo(() => [...new Set(cambios.map((c) => (c.esIA ? 'IA' : c.autorNombre)).filter(Boolean))], [cambios]);
@@ -173,39 +179,18 @@ const Historial = ({ cambios }) => {
   );
 };
 
-/** Dictado con el reconocimiento de voz del navegador (Chrome/Edge). */
-const useDictado = (alTexto) => {
-  const [escuchando, setEscuchando] = useState(false);
-  const reconocedorRef = useRef(null);
-  const disponible = typeof window !== 'undefined' && (window.SpeechRecognition || window.webkitSpeechRecognition);
-  const alternar = () => {
-    if (!disponible) {
-      Swal.fire({ icon: 'info', title: 'Dictado no disponible', text: 'Este navegador no permite dictar. Usa Chrome o Edge, o el botón de voz de la burbuja de IA.' });
-      return;
-    }
-    if (escuchando) { reconocedorRef.current?.stop(); return; }
-    const R = window.SpeechRecognition || window.webkitSpeechRecognition;
-    const rec = new R();
-    rec.lang = 'es-ES';
-    rec.interimResults = false;
-    rec.onresult = (e) => alTexto(Array.from(e.results).map((r) => r[0].transcript).join(' '));
-    rec.onend = () => setEscuchando(false);
-    rec.onerror = () => setEscuchando(false);
-    reconocedorRef.current = rec;
-    setEscuchando(true);
-    rec.start();
-  };
-  return { escuchando, alternar };
-};
-
-/** Grabar audio con el micrófono (se transcribe en el servidor con la IA). */
+/**
+ * Grabar audio con el micrófono: con conexión lo transcribe la IA del servidor y sin conexión
+ * Whisper en este equipo. Es el único micrófono del chat: el dictado del navegador
+ * (SpeechRecognition) depende de un servicio en línea y en muchos navegadores no hacía nada.
+ */
 const useGrabadora = (alTerminar) => {
   const [grabando, setGrabando] = useState(false);
   const grabadoraRef = useRef(null);
   const alternar = async () => {
     if (grabando) { grabadoraRef.current?.stop(); return; }
     if (!navigator.mediaDevices?.getUserMedia || typeof window.MediaRecorder === 'undefined') {
-      Swal.fire({ icon: 'info', title: 'Grabación no disponible', text: 'Este navegador no permite grabar audio. Sube un archivo de audio o usa el dictado 🎤.' });
+      Swal.fire({ icon: 'info', title: 'Grabación no disponible', text: 'Este navegador no permite grabar audio. Sube un archivo de audio con 📎.' });
       return;
     }
     try {
@@ -240,12 +225,13 @@ const PESTANAS = [
  * @param {boolean} enLinea  hay conexión con el servidor (si no, trabaja la IA local)
  * @param {{pedir, leerImagen, transcribir}} iaLocal  la IA local de este equipo (hooks/useIALocal)
  */
-export default function ChatSala({ colaboracion, currentUser, onEnfocarClase, onQuitarMarcas, abierto, setAbierto, enLinea = true, iaLocal = null }) {
+export default function ChatSala({ colaboracion, currentUser, onEnfocarClase, onQuitarMarcas, abierto, setAbierto, enLinea = true, iaLocal = null, pedidoExterno = null }) {
   const {
     mensajes, propuestas, estadoIA, cambios, bienvenida, sinLeer, hayAnteriores,
     enviar, enviarAdjunto, cargarAnteriores, decidir, cerrarBienvenida, marcarLeidos, agregarSinConexion, pendientes = 0,
   } = colaboracion;
-  // Panel de la IA local (modelos, Ollama) y la IA local trabajando en un pedido
+  // Panel de la IA local (modelos, Ollama) y la IA local trabajando en un pedido. El panel puede
+  // abrirse por un modelo que faltó: 'voz' | 'texto' | 'vista' (lo destaca arriba con la sugerencia)
   const [panelLocal, setPanelLocal] = useState(false);
   const [trabajandoLocal, setTrabajandoLocal] = useState(false);
   const sinConexion = !enLinea;
@@ -255,11 +241,18 @@ export default function ChatSala({ colaboracion, currentUser, onEnfocarClase, on
   // Propuesta que se está ajustando y archivo adjunto (foto o audio) del próximo mensaje
   const [ajustando, setAjustando] = useState(null);
   const [adjunto, setAdjunto] = useState(null);
+  const [sinSugerencias, setSinSugerencias] = useState(sugerenciasOcultas);
+  const ocultarSugerencias = (ocultar) => {
+    setSinSugerencias(ocultar);
+    try {
+      if (ocultar) localStorage.setItem(SUGERENCIAS_OCULTAS, '1');
+      else localStorage.removeItem(SUGERENCIAS_OCULTAS);
+    } catch { /* sin almacenamiento: vale para esta sesión */ }
+  };
   const archivoRef = useRef(null);
   const grabadora = useGrabadora((archivo) => setAdjunto({ tipo: 'audio', archivo }));
   const finRef = useRef(null);
   const entradaRef = useRef(null);
-  const dictado = useDictado((t) => setTexto((prev) => `${prev ? `${prev} ` : ''}${t}`));
   const propuestaPorId = useMemo(() => new Map(propuestas.map((p) => [p.id, p])), [propuestas]);
   const enChat = pestana === 'equipo' || pestana === 'ia';
   const deIA = pestana === 'ia';
@@ -271,6 +264,15 @@ export default function ChatSala({ colaboracion, currentUser, onEnfocarClase, on
   useEffect(() => { if (abierto && enChat) finRef.current?.scrollIntoView({ block: 'end' }); }, [abierto, pestana, visibles.length, estadoIA.ocupada]); // eslint-disable-line react-hooks/exhaustive-deps
   // Si alguien escribe o la IA responde mientras está cerrado, el contador avisa
   useEffect(() => { if (bienvenida) setAbierto(true); }, [bienvenida]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Pedido desde fuera del chat (por ejemplo "Verificar Diagrama" sin conexión): va al chat de la IA
+  const ultimoPedidoRef = useRef(null);
+  useEffect(() => {
+    if (!pedidoExterno || ultimoPedidoRef.current === pedidoExterno.n) return;
+    ultimoPedidoRef.current = pedidoExterno.n;
+    setPestana(pedidoExterno.pestana || 'ia');
+    if (sinConexion && pedidoExterno.texto) mandarSinConexion(true, pedidoExterno.texto);
+  }, [pedidoExterno]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const cambiarPestana = (p) => {
     setPestana(p);
@@ -291,8 +293,7 @@ export default function ChatSala({ colaboracion, currentUser, onEnfocarClase, on
       if (adjunto?.tipo === 'audio') {
         const transcripcion = iaLocal ? await iaLocal.transcribir(adjunto.archivo) : null;
         if (transcripcion === null) {
-          Swal.fire({ icon: 'info', title: 'Falta el modelo de voz', text: 'Para usar audio sin conexión, descarga el modelo de voz en 💻 IA local (una sola vez, con internet).' });
-          setPanelLocal(true);
+          setPanelLocal('voz');
           return;
         }
         if (!transcripcion.trim()) {
@@ -316,9 +317,12 @@ export default function ChatSala({ colaboracion, currentUser, onEnfocarClase, on
       if (!iaLocal) return;
       setTrabajandoLocal(true);
       try {
-        const r = imagen ? await iaLocal.leerImagen(imagen, pedido) : await iaLocal.pedir(pedido);
+        // "Revisa el diagrama", "¿qué corregir?": revisión sin internet (reglas + Ollama), no cambia nada
+        const r = imagen ? await iaLocal.leerImagen(imagen, pedido)
+          : pideRevision(pedido) && iaLocal.revisar ? await iaLocal.revisar()
+            : await iaLocal.pedir(pedido);
         agregarSinConexion({ canal: 'ia', tipo: 'ia', texto: r.texto, datos: r.datos });
-        if (r.abrirPanel) setPanelLocal(true);
+        if (r.abrirPanel) setPanelLocal(r.falta || true);
       } catch (error) {
         agregarSinConexion({ canal: 'ia', tipo: 'ia', texto: `La IA local no pudo responder: ${error?.message || 'error desconocido'}.`, datos: { motor: 'error', cambios: 0 } });
       } finally {
@@ -427,7 +431,7 @@ export default function ChatSala({ colaboracion, currentUser, onEnfocarClase, on
 
       {panelLocal ? (
         <div className="flex-1 overflow-y-auto bg-white">
-          <PanelIALocal onCerrar={() => setPanelLocal(false)} onCambio={() => {}} />
+          <PanelIALocal onCerrar={() => setPanelLocal(false)} onCambio={() => {}} falta={typeof panelLocal === 'string' ? panelLocal : null} />
         </div>
       ) : pestana === 'historial' ? <Historial cambios={cambios} /> : (
         <>
@@ -489,11 +493,12 @@ export default function ChatSala({ colaboracion, currentUser, onEnfocarClase, on
             <div ref={finRef} />
           </div>
           <div className="border-t bg-white p-2">
-            {deIA && (
-              <div className="mb-1.5 flex flex-wrap gap-1">
-                {(sinConexion ? SUGERENCIAS_SIN_CONEXION.map((s) => [s, s]) : SUGERENCIAS).map(([etiqueta, pedido]) => (
+            {deIA && !sinSugerencias && (
+              <div className="mb-1.5 flex flex-wrap items-center gap-1">
+                {(sinConexion ? [SUGERENCIAS[0], ...SUGERENCIAS_SIN_CONEXION.map((s) => [s, s])] : SUGERENCIAS).map(([etiqueta, pedido]) => (
                   <button key={etiqueta} onClick={() => setTexto(pedido)} className="rounded-full border border-violet-200 px-2 py-0.5 text-[11px] text-violet-800 hover:bg-violet-50">{etiqueta}</button>
                 ))}
+                <button onClick={() => ocultarSugerencias(true)} className="ml-auto rounded-full px-2 py-0.5 text-[11px] text-gray-500 hover:bg-gray-100 hover:text-gray-800" title="Esconder las sugerencias para dejar más espacio al chat (vuelven con 💡)">▾ Esconder sugerencias</button>
               </div>
             )}
             {(ajustando || adjunto) && (
@@ -527,7 +532,9 @@ export default function ChatSala({ colaboracion, currentUser, onEnfocarClase, on
             <div className="mt-1.5 flex gap-1.5">
               <input ref={archivoRef} type="file" accept={deIA ? 'image/*,audio/*' : 'audio/*'} className="hidden" onChange={elegirArchivo} />
               <button onClick={() => archivoRef.current?.click()} className="rounded-lg border border-gray-300 px-2 text-sm hover:bg-gray-50" title={deIA ? 'Adjuntar una foto (pizarra, captura) o un audio' : 'Adjuntar un audio (se transcribe)'}>📎</button>
-              {!sinConexion && <button onClick={dictado.alternar} className={`rounded-lg border px-2 text-sm ${dictado.escuchando ? 'border-red-400 bg-red-50 text-red-700 animate-pulse' : 'border-gray-300 hover:bg-gray-50'}`} title="Dictar con la voz (se escribe en el cuadro)">🎤</button>}
+              {deIA && sinSugerencias && (
+                <button onClick={() => ocultarSugerencias(false)} className="rounded-lg border border-gray-300 px-2 text-sm hover:bg-gray-50" title="Mostrar las sugerencias de pedidos">💡</button>
+              )}
               <button onClick={grabadora.alternar} className={`rounded-lg border px-2 text-sm ${grabadora.grabando ? 'border-red-400 bg-red-50 text-red-700 animate-pulse' : 'border-gray-300 hover:bg-gray-50'}`} title={grabadora.grabando ? 'Terminar la grabación' : 'Grabar un audio (se transcribe)'}>{grabadora.grabando ? '⏹' : '🎙️'}</button>
               {deIA ? (
                 <button onClick={mandar} disabled={(!texto.trim() && !adjunto) || enviando || trabajandoLocal} className="flex-1 rounded-lg bg-violet-600 px-2 py-1.5 text-sm text-white hover:bg-violet-700 disabled:opacity-40">{sinConexion ? '💻 Pedir a la IA local' : '🤖 Pedir a la IA'}</button>
